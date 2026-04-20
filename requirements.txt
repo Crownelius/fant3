@@ -1,0 +1,14 @@
+torch>=2.5.0
+torchvision>=0.20.0
+tokenizers>=0.20.0
+datasets>=3.0.0
+huggingface_hub>=0.25.0
+bitsandbytes>=0.43.0
+numpy>=1.26.0
+tqdm>=4.66.0
+matplotlib>=3.8.0
+tensorboard>=2.16.0
+einops>=0.8.0
+safetensors>=0.4.0
+sentencepiece>=0.2.0
+regex>=2024.4.0

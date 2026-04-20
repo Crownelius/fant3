@@ -1,0 +1,101 @@
+# ============================================================================
+# Secrets — NEVER commit
+# ============================================================================
+.openrouter_key
+.env
+.env.*
+*.key
+credentials*
+*.secret
+*_token.txt
+huggingface_token.txt
+
+# ============================================================================
+# Training outputs — the 9.6 GB exclusion.
+# We keep TWO things under output/:
+#   - output/tokenizer/tokenizer_v2.json (retrained BPE artifact, reproducible)
+#   - output/decontamination/ngram_hashes.json (benchmark n-gram cache)
+# Everything else (checkpoints, logs, old campaigns) is excluded.
+# ============================================================================
+output/*
+!output/tokenizer/
+output/tokenizer/*
+!output/tokenizer/tokenizer_v2.json
+!output/tokenizer/tokenizer_v2_smoke.json
+!output/decontamination/
+output/decontamination/*
+!output/decontamination/ngram_hashes.json
+
+# ============================================================================
+# Data / cache — rebuildable from HF
+# ============================================================================
+data/
+.hf_cache/
+hf_cache/
+**/*.parquet
+**/*.arrow
+
+# ============================================================================
+# Model weights — too big for git, use Hugging Face Hub instead
+# ============================================================================
+*.pt
+*.bin
+*.ckpt
+*.safetensors
+*.pth
+
+# ============================================================================
+# Build / package artifacts
+# ============================================================================
+fant_code.zip
+*.zip
+*.tar.gz
+*.tar
+*.gz
+build/
+dist/
+*.egg-info/
+
+# ============================================================================
+# Python
+# ============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ============================================================================
+# Virtual environments
+# ============================================================================
+venv/
+env/
+.venv/
+.env/
+ENV/
+
+# ============================================================================
+# IDE / editor
+# ============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ============================================================================
+# Colab / Jupyter
+# ============================================================================
+.ipynb_checkpoints/
+
+# ============================================================================
+# Claude Code / local scratch
+# ============================================================================
+.claude/
