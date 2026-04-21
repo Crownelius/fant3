@@ -132,6 +132,28 @@ class FANT3Config:
     # and essential for 1b on Colab A100 80 GB.
     use_gradient_checkpointing:     bool = False
 
+    # --- MoR LTI-style injection (landed 2026-04-20) ------------------------
+    # Adapted from Mythos / Recurrent-Depth Transformer (RDT) literature. Each
+    # pass through the MoR shared block is updated with:
+    #     current_{k+1} = A * current_k + B * x_original + C * retrieved + block(current_k + loop_emb[k])
+    # where
+    #   - A is a diagonal matrix with A = -softplus(a_diag), guaranteeing
+    #     spectral radius rho(A) < 1 for recurrent stability.
+    #   - B injects the ORIGINAL input to prevent hidden-state drift.
+    #   - C injects the Apollonian-retrieved memory context (FANT-specific —
+    #     this is what keeps FANT central in the synthesis).
+    #   - loop_emb[k] is a learned per-pass positional signal so the same
+    #     shared block behaves differently on different passes.
+    # These are all OPTIONAL via the three flags below — default off so
+    # existing checkpoints remain bit-compatible with the un-augmented MoR.
+    mor_lti_injection_enabled:      bool = False
+    mor_spectral_constraint:        bool = False
+    mor_loop_index_enabled:         bool = False
+    # When mor_lti_injection_enabled, the Apollonian-retrieved context C*retrieved
+    # channel is added only when BOTH this flag and spinor_apollonian_enabled
+    # are True AND the memory pack has >0 items.
+    mor_lti_apollonian_channel:     bool = True
+
 
 # -----------------------------------------------------------------------------
 #  Presets
