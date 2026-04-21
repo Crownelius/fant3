@@ -1,230 +1,254 @@
-# FANT 2 — Fractal Atomic Neural Topology, Generation 2
+# FANT 3 (Fractal Atomic Neural Topology version 3)
 
-> *"Train an attention pattern to be Apollonian, train a routing distribution to
-> be Parisi-ultrametric, and train a residual stream to be at the edge of chaos —
-> then let the model see what kind of cognition falls out."*
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![License](https://img.shields.io/badge/license-TBD-lightgrey)
+![Status](https://img.shields.io/badge/status-active%20research-green)
 
-FANT 2 is the second-generation Fractal Atomic Neural Topology language model:
-a 60M-stored / 200M-active fractal Mixture-of-Experts transformer designed
-around three commitments:
+> *"Train an attention pattern to be Apollonian, train a routing distribution to be Parisi-ultrametric, and train a residual stream to be at the edge of chaos — then let the model see what kind of cognition falls out."*
 
-1. **The brain-as-Apollonian-packing hypothesis.** Sparse circuits in cortex
-   look like Apollonian gaskets (recursive disk packings); FANT 2 builds the
-   same structure into its memory module, its routing tree, and its weight
-   generation.
-2. **The Free Energy Principle as a single training signal.** Cross-entropy,
-   z-loss, KL-to-prior, and Parisi RSB diversity collapse into one
-   variational free-energy bound that all phases optimize variants of.
-3. **Hard architectural defenses against router collapse.** FANT 350M, the
-   prior generation, lost 94.5% of its routing onto a single expert after one
-   epoch. FANT 2 ships a hierarchical, sigmoid-gated, ETF-initialized,
-   bias-balanced, Tikkun-repaired, Fanā-shuffled router whose collapse
-   regression test is part of CI.
+FANT 3 is the third-generation **Fractal Atomic Neural Topology** language model research workspace. It explores a cluster of ideas that do not fit neatly into standard transformer recipes:
 
-This repository is a self-contained implementation: model, tokenizer, training
-loop, 7-phase pipeline, inference, evaluation, CLI, and tests.
+- **MoE (Mixture of Experts)** with Matryoshka nested coarse-to-fine activation for elastic inference
+- **MoR (Mixture of Recursions)** for per-token adaptive compute depth
+- **MASA (Multi-head Attention with Shared Atoms)** where all layers share a learned dictionary of attention basis matrices
+- **Apollonian-geometry memory** — two complementary memory packs (α instance / β schema) split by Kocik tangency spinors rather than a scalar threshold
+- **AHN (Artificial Hippocampus Networks)** — a sliding short-term buffer plus a compressed long-term buffer applied as a gated residual
+- **ETF (Equiangular Tight Frame)** router freezing for free compression after warmup
+- **Cerebellum** — an echo-state reservoir with Purkinje readout (active at 742m and 1b scales)
+
+The workspace targets a single Ampere-class GPU (RTX 3060 12 GB for development, A100 40–96 GB for training runs), with **bf16 (bfloat16)** weights, 8-bit AdamW, and gradient checkpointing.
 
 ---
 
-## Quick start
+## Table of Contents
+
+1. [Quick Facts](#quick-facts)
+2. [Quickstart](#quickstart)
+3. [Architecture](#architecture)
+4. [Training Recipes and Data](#training-recipes-and-data)
+5. [Notebooks](#notebooks)
+6. [Scripts](#scripts)
+7. [Testing](#testing)
+8. [Evaluation](#evaluation)
+9. [History](#history)
+10. [Architectural Decisions](#architectural-decisions)
+11. [Related Research](#related-research)
+12. [License and Acknowledgments](#license-and-acknowledgments)
+
+---
+
+## Quick Facts
+
+| Attribute | Value |
+|---|---|
+| Supported scales | 20m, 50m, 150m, 350m, 742m, 1b |
+| Actual stored param counts | 23.5M / 50.8M / 96M / 263M / 770.88M / 986.62M |
+| Minimum hardware (50m) | A100 40 GB (Colab Pro) |
+| Minimum hardware (742m / 1b) | A100 80–96 GB |
+| Training tokens (742m Tier C) | 81.92M (190x under Chinchilla-optimal for this scale) |
+| Latest milestone | 742m Tier C: 78.6 min on A100 96 GB, best CE (Cross-Entropy) 5.72 at step 7025 |
+| Vocabulary | 32,768 BPE (Byte-Pair Encoding) tokens, retrained on 6-source distillation mix |
+| Precision | bf16 weights + 8-bit AdamW + gradient checkpointing at 742m+ |
+| Key architectural novelties | Matryoshka MoE, SpinorApollonianMemory, MASA, MoR, AHN, ETF freezing |
+
+> **Important:** The named presets (`fant3_742m`, `fant3_1b`) have been calibrated to their advertised sizes as of 2026-04-19. The original presets materialized 6.6B and ~7B parameters respectively due to full-rank expert weight matrices ignoring the Kronecker config fields. Always verify with `sum(p.numel() for p in model.parameters())` before trusting a VRAM budget.
+
+---
+
+## Quickstart
+
+For a five-minute end-to-end walkthrough see **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)**.
+
+The fastest path:
 
 ```bash
-# 1. Install
+# 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Smoke-test the package and run the FANT 350M router-collapse regression test
+# 2. Smoke-test (CPU, ~30 seconds)
+python scripts/smoke_fant3.py
+
+# 3. Run the full test suite
 python -m pytest tests/ -v
 
-# 3. Show the locked default config + parameter count
-python -m fant2 info
-
-# 4. Train end-to-end on a tiny preset (fits on CPU in a few minutes)
-PRESET=tiny DEVICE=cpu N_STEPS=200 ./train.sh all
+# 4. Train (Colab notebook, recommended for GPU)
+# Open notebooks/fant3_colab_train.ipynb in Google Colab
+# Set TARGET_SCALE = '50m' and run top-to-bottom
 ```
 
-Or, if you have GNU make:
+Colab is the recommended training environment. See [docs/NOTEBOOKS.md](docs/NOTEBOOKS.md) for a cell-by-cell walkthrough.
+
+---
+
+## Architecture
+
+Architecture deep-dives live in **[docs/architecture/](docs/architecture/)**.
+
+High-level summary:
+
+| Component | Design |
+|---|---|
+| Attention | MASA — all layers share `n_attention_atoms` basis matrices; per-layer coefficients of rank `masa_coef_rank` |
+| Feed-forward | Matryoshka MoE — nested megapools of experts; elastic inference by level |
+| Depth | MoR — lightweight router selects recursion depth per token (1–3 passes) |
+| Memory | SpinorApollonianMemory — Kocik Cl(2,1) spinor chirality splits hidden states into α (instance) / β (schema) packs |
+| Short-term memory | AHN — FIFO of last `short_window` tokens + compressed long-term latents; gated residual before final norm |
+| Reservoir | Cerebellum — echo-state reservoir (spectral radius 0.95) + Purkinje linear readout; fixed 25M params regardless of scale |
+| Router stability | Simplex ETF initialization; frozen after `etf_freeze_after_step` |
+| Vocabulary | 32,768-token BPE tokenizer trained on 82K documents from the 6-source distillation mix |
+
+FANT 3 builds on the FANT 2 lineage but is a clean-room implementation with these key differences:
+
+- **FANT 2**: 60M stored / 200M active, HierarchicalApollonianRouter, 7-phase FEP training pipeline, RTX 3060 target
+- **FANT 3**: 20M–1B stored, Matryoshka MoE, MoR, MASA, SpinorApollonianMemory, Colab A100 primary target, single-notebook training
+
+---
+
+## Training Recipes and Data
+
+Dataset registry, data mixing logic, and decontamination details live in **[docs/datasets/](docs/datasets/)**.
+
+Brief summary of the data strategy:
+
+- **MIX v3 (NVIDIA-heavy, for 150m–1b)**: 11 sources, NVIDIA datasets at 60% weight (OpenMathReasoning, OpenCodeReasoning-2, Cascade-2 math/chat/science), FineWeb-Edu 20%, Sonnet 4.6 distillation 12%, Opus 4.6 distillation 8%
+- **MIX v4 (chat-focused, for 20m–50m)**: 12 sources, Sonnet 4.6 at 22%, Cascade-2 chat/IF, FineTome, Daring-Anteater; targets fluent short-form conversation
+- **Decontamination**: 13-gram SHA-1 filter against GSM8K + MATH-500 + MMLU test sets (457,910 unique hashes); worst contamination rate 1.80% (NVIDIA OpenMathInstruct-2)
+- **Format**: All training targets wrapped in `<|answer|>...<|/answer|>` tags matching the evaluation extraction pattern
+
+---
+
+## Notebooks
+
+Full cell-by-cell documentation: **[docs/NOTEBOOKS.md](docs/NOTEBOOKS.md)**.
+
+The primary training notebook is `notebooks/fant3_colab_train.ipynb` — 28 cells, parameterized by a single `TARGET_SCALE` constant (`'20m'`, `'50m'`, `'150m'`, `'350m'`, `'742m'`, `'1b'`).
+
+Quick reference for Colab A100:
+
+| Scale | Effective batch | Sequence length | Steps | Approx wall time | VRAM (GPU RAM) |
+|---|---|---|---|---|---|
+| 50m | 32 | 1024 | 60,000 | ~12 h | ~8 GB |
+| 150m | 8 | 512 | 2,500 | ~45 min | ~8 GB |
+| 350m | 8 | 512 | 5,000 | ~2 h | ~15 GB |
+| 742m | 8 | 1024 | 10,000 | ~80 min | ~46 GB |
+| 1b | 8 | 1024 | 12,000 | ~95 min | ~50 GB |
+
+---
+
+## Scripts
+
+The `scripts/` directory contains standalone Python scripts for training, evaluation, and diagnostics. Key scripts:
+
+| Script | Purpose |
+|---|---|
+| `smoke_fant3.py` | Quick end-to-end smoke test (CPU, ~30 s) |
+| `scale_ladder_smoke.py` | Validates all five scales end-to-end |
+| `decontaminate.py` | Builds/queries the 13-gram benchmark contamination filter |
+| `eval_benchmarks.py` | Unified GSM8K / MMLU / MATH-500 evaluator with Wilson 95% CI |
+| `eval_1k.py` / `eval_1k_default.py` | 1K-problem accuracy eval with extraction |
+| `retrain_tokenizer.py` | Trains `tokenizer_v2.json` from the 6-source corpus |
+| `train_2b.py` | Standalone 2B-scale training (requires 24+ GB VRAM) |
+| `run_campaign_n.py` | Runner for FANT 2 Campaign N ablations |
+
+---
+
+## Testing
 
 ```bash
-make help
-make test
-make info PRESET=tiny
-make train-all PRESET=tiny DEVICE=cpu N_STEPS=200
+python -m pytest tests/ -v        # full suite (~30 tests)
+python -m pytest tests/test_smoke.py -v           # import + forward/backward
+python -m pytest tests/test_spinor_apollonian.py  # SpinorApollonianMemory (10 tests)
+python -m pytest tests/test_ahn.py                # AHN (6 tests)
+python -m pytest tests/test_sae.py                # SAE diagnostics (6 tests)
+python -m pytest tests/test_router_collapse.py    # FANT 2 router regression canary
 ```
 
----
-
-## What's in the box
-
-```
-fant2/
-├── config.py                 # FANT2Config dataclass + presets (default, tiny)
-├── constants.py              # vocab IDs, chat-template tokens
-├── model/                    # the architecture
-│   ├── norm.py               # RMSNorm
-│   ├── rope.py               # partial RoPE (Phi-4-Mini, 25%)
-│   ├── kron3.py              # 3-level Kronecker A ⊗ B ⊗ C
-│   ├── experts.py            # FractalSeed, Zero, Copy, SharedNarrow, DenseSwiGLU
-│   ├── router.py             # HierarchicalApollonianRouter
-│   ├── moe.py                # FractalMoELayer
-│   ├── hub_attention.py      # GQA-2 + 32 hub tokens + 4 sinks + window=128
-│   ├── cerebellum.py         # echo-state reservoir + Purkinje readout
-│   ├── apollonian.py         # α/β memory dual-pack
-│   ├── memory_retrieval.py   # ApollonianRetrievalAttention
-│   ├── transformer_block.py
-│   └── fant2_model.py        # FANT2Model (top-level)
-├── tokenizer/                # BPE wrapper around HuggingFace `tokenizers`
-├── data/                     # streaming data sources
-├── training/
-│   ├── optimizer.py          # Muon (Newton-Schulz) + HybridOptimizer (Muon + AdamW8bit)
-│   ├── losses.py             # FEP unified, LLM-JEPA, calibration, SimPO, KTO, Dr.GRPO
-│   ├── telemetry.py          # 8-metric diagnostic suite
-│   ├── monitors.py           # tikkun, Fanā, JSD canary
-│   ├── trainer.py            # FANT2Trainer (phase dispatcher)
-│   ├── phase_common.py       # shared CLI flags
-│   ├── phase0_bpe.py         # BPE tokenizer training
-│   ├── phase1_jepa.py        # LLM-JEPA + SIGReg pretrain
-│   ├── phase2_moe.py         # MoE specialization
-│   ├── phase3_calibrate.py   # active-layer calibration
-│   ├── phase4_refine.py      # self-refinement + STaR + Apollonian fill
-│   ├── phase5_grpo.py        # Dr.GRPO RL (stub)
-│   └── phase6_simpo_kto.py   # SimPO + KTO preference (stub)
-├── inference/                # FANT2Generator + GenerationConfig + ChatSession
-├── bench/                    # perplexity, GSM8K, ARC, HellaSwag
-├── cli/                      # `python -m fant2 ...` dispatcher
-└── __main__.py
-tests/
-├── test_smoke.py             # imports + forward + backward + optimizer
-├── test_router_collapse.py   # the FANT 350M regression canary
-└── test_trainer_integration.py
-```
+The test suite covers:
+- All public FANT 3 modules (config, attention, MoE, MoR, spinor memory, AHN, SAE)
+- SpinorApollonianMemory chirality balance (verified unbiased at 5-seed mean 0.5188)
+- AHN buffer saturation and gate initialization
+- FANT 2 router-collapse regression (single expert must not exceed 85% load; FANT 350M had 94.5%)
+- Trainer integration (every FANT 2 phase, loss keys, parameter updates, checkpoint round-trip)
 
 ---
 
-## Architecture (locked spec)
+## Evaluation
 
-| component         | spec                                                                       |
-|-------------------|----------------------------------------------------------------------------|
-| dimensions        | dim=768, 12 layers (2 dense + 10 MoE), GQA-2 (8 query / 2 KV heads), head_dim=96 |
-| RoPE              | partial 25% (Phi-4-Mini); θ = 10000                                       |
-| MoE               | 72 fractal seeds in 8 mega-pools × 9 (Parisi RSB ultrametric)             |
-| router            | HierarchicalApollonianRouter: 2 stages, sigmoid gating, Simplex ETF init  |
-| router defenses   | DeepSeek aux-loss-free bias, OLMoE z-loss, FEP KL-to-prior, Tikkun, Fanā  |
-| Kronecker         | A(40,8) ⊗ B(32,32) ⊗ C(32,40)  →  effective (768, 1280)                   |
-| attention         | Hub: 32 hubs (VEN analog), 4 sinks (StreamingLLM), window=128             |
-| cerebellum        | echo-state reservoir (spectral radius 0.95) + Purkinje linear readout      |
-| memory            | Apollonian α (instances) + β (schemas), retrieval at last 2 layers         |
-| optimizer         | Muon (Newton-Schulz quintic) for matrices + AdamW8bit for vectors         |
-| BF16 / ckpt       | enabled by default                                                         |
-
-Approximate parameter count for the locked preset:
-- **stored** (physical): ~60 M
-- **active per forward** (top-k expansion): ~200 M
-
----
-
-## The 7 training phases
-
-| phase | name                              | key loss components                                       |
-|-------|-----------------------------------|----------------------------------------------------------|
-| 0     | BPE tokenizer                     | (no model training; trains the byte-level BPE tokenizer) |
-| 1     | LLM-JEPA + SIGReg pretrain        | CE + JEPA + SIGReg                                       |
-| 2     | MoE specialization                | CE + α·z_loss + β·KL(router ‖ uniform)                   |
-| 3     | active-layer calibration          | Phase 2 + rank-collapse + condition-number penalties     |
-| 4     | self-refinement + STaR + Apollonian fill | Phase 2 + success-estimator BCE                  |
-| 5     | Dr.GRPO RL (stub)                 | (currently falls back to Phase 2 loss)                   |
-| 6     | SimPO + KTO preference (stub)     | (currently falls back to Phase 2 loss)                   |
-
-Phases 5 and 6 are placeholder loops: they run the trainer infrastructure
-end-to-end with the FEP loss while the full Dr.GRPO rollout / preference-pair
-logic is filled in.
-
----
-
-## CLI
+After training, evaluation runs through `scripts/eval_benchmarks.py`:
 
 ```bash
-python -m fant2 <subcommand> [args]
+python scripts/eval_benchmarks.py \
+    --ckpt output/742m/final.pt \
+    --tokenizer output/tokenizer/tokenizer_v2.json \
+    --benchmark gsm8k \
+    --n 50
 ```
 
-| subcommand          | description                                            |
-|---------------------|--------------------------------------------------------|
-| `info`              | print config + model parameter count                   |
-| `train-phase0`      | train BPE tokenizer                                    |
-| `train-phase1` … `train-phase6` | train one phase of the pipeline             |
-| `generate`          | one-shot text generation                               |
-| `chat`              | interactive chat session (ChatML template)             |
-| `eval-ppl`          | perplexity on a stream                                 |
-| `eval-gsm8k`        | GSM8K accuracy                                         |
-| `eval-arc`          | ARC-Easy / ARC-Challenge multichoice                    |
-| `eval-hellaswag`    | HellaSwag multichoice (length-normalized)              |
+Supported benchmarks: `gsm8k`, `mmlu`, `math500`.
 
-Run `python -m fant2 --help` for a full list and per-command flags.
+Expected results at current training scale (742m Tier C, 82M tokens):
+- **GSM8K**: 1–4% (undertrained; Chinchilla-optimal would be 15B tokens)
+- **MMLU**: ~26% (at statistical chance; 4-way multiple-choice baseline is 25%)
+
+The Colab notebook (cell 26) runs GSM8K + MMLU automatically after training completes.
 
 ---
 
-## Tests
+## History
 
-The test suite is the contract: anything that ships **must** pass
-`pytest tests/`. Three files cover three layers:
+Chronological training log: **[docs/HISTORY.md](docs/HISTORY.md)**.
 
-- `tests/test_smoke.py` — every public symbol imports cleanly; tiny model
-  forward + backward + optimizer step succeed.
-- `tests/test_router_collapse.py` — **the FANT 350M regression canary.** Runs
-  the router on multiple synthetic "domains" and asserts no single mega-pool
-  ever exceeds 85 % load (FANT 350M had 94.5 %). Also unit-tests the
-  aux-loss-free bias balancer, the Tikkun repair trigger, and the JSD metric.
-- `tests/test_trainer_integration.py` — runs a few steps of every phase on the
-  tiny preset, asserts the loss dict has the expected keys, parameters
-  actually update, the loss is finite, and the checkpoint round-trip works.
+Milestones in reverse chronological order:
 
-```bash
-make test                 # full suite
-make smoke                # imports + forward/backward only
-make router-canary        # the FANT 350M regression canary alone
-make integration          # the trainer integration tests alone
-```
+| Date | Event |
+|---|---|
+| 2026-04-19 | 742m Tier C complete: 78.6 min, best CE 5.72, domain vocabulary acquired |
+| 2026-04-19 | Preset size bugs fixed: 742m was secretly 6.6B; 1b was secretly ~7B |
+| 2026-04-19 | Gradient checkpointing landed: 2.65x VRAM reduction, bit-exact loss |
+| 2026-04-19 | NVIDIA full stack integrated (MIX v3, NeMo-style recipe) |
+| 2026-04-19 | 150m validation baseline: CE 6.66 at 750 steps, "the the the" → word-frequency learning |
+| 2026-04-19 | Five pre-launch fixes landed (answer-tag format, tokenizer v2, SpinorApollonian, AHN, SAE) |
+| 2026-04-18 | HF archive extended to 36 months + 23 AI labs (2,286 KG triples) |
+| 2026-04-16 | N3 SleepGate result: 59.9% (+5.3pp over L1.5 baseline) — new FANT 2 best |
+| 2026-04-16 | FANT 3 architectural modules landed and smoke-tested |
 
 ---
 
-## Hardware notes
+## Architectural Decisions
 
-The locked default preset is sized for 24 GB consumer GPUs (RTX 3090 / 4090).
-With BF16 + gradient checkpointing + AdamW8bit it fits comfortably in 12-16 GB
-of VRAM at batch=8, seq=1024.
+All ADRs (Architectural Decision Records) are in **[docs/ADR/](docs/ADR/)**.
 
-For CPU-only smoke tests, use `PRESET=tiny`.
-
----
-
-## Training a model end-to-end
-
-The simplest path:
-
-```bash
-# Tiny smoke test (CPU, ~minutes)
-PRESET=tiny DEVICE=cpu N_STEPS=200 ./train.sh all
-
-# Real training run (GPU, hours-to-days)
-PRESET=default DEVICE=cuda N_STEPS=50000 BATCH=8 SEQ_LEN=1024 ./train.sh all
-```
-
-Or per-phase, with your own config flags:
-
-```bash
-./train.sh 0   # tokenizer
-./train.sh 1   # JEPA
-./train.sh 2   # MoE specialization
-./train.sh 3   # calibration
-./train.sh 4   # refinement
-./train.sh 5   # Dr.GRPO (stub)
-./train.sh 6   # preference (stub)
-```
-
-Each phase resumes from the previous phase's `final.pt` automatically.
+| ADR | Decision |
+|---|---|
+| [ADR 0001](docs/ADR/0001-matryoshka-moe-over-standard-moe.md) | Matryoshka MoE over standard top-k MoE |
+| [ADR 0002](docs/ADR/0002-spinor-apollonian-over-scalar-curvature.md) | Spinor Apollonian memory over scalar curvature classifier |
+| [ADR 0003](docs/ADR/0003-nvidia-datasets-over-community.md) | NVIDIA reasoning datasets as primary training signal |
+| [ADR 0004](docs/ADR/0004-gradient-checkpointing-for-742m-plus.md) | Gradient checkpointing mandatory at 742m and above |
 
 ---
 
-## License & status
+## Related Research
 
-This is a research codebase. The architecture is locked and the test suite
-passes; phases 5 and 6 are stubs awaiting their full implementation.
+Key papers grounding the FANT 3 architecture:
+
+| Paper | Connection |
+|---|---|
+| Kocik, arXiv:2001.05866 — Spinors and Descartes | Theoretical basis for SpinorApollonianMemory chirality split |
+| Wang et al., arXiv:2509.26520 — Matryoshka MoE | Nested expert activation with elastic inference |
+| ByteDance AHN (2025) | Artificial Hippocampus Network short+long term memory |
+| Anthropic Scaling Monosemanticity (2024) | SAE introspection design |
+| TurboQuant, arXiv:2504.19874 (ICLR 2026) | Post-training KV-cache compression (planned) |
+| Parisi RSB / de Almeida-Thouless, arXiv:2604.11921 | Theoretical grounding for MoE routing diversity |
+| Delétang et al. (2023) — Language Models are Compressors | Compression-as-intelligence framing |
+| TRIM-KV, arXiv:2512.03324 | Retention gate for Apollonian memory eviction (planned) |
+| Kimi k1.5 (2025) | SleepGate memory consolidation inspiration |
+
+---
+
+## License and Acknowledgments
+
+License: TBD (research-only at present).
+
+Training data sources are CC-BY-4.0 (NVIDIA datasets) and permissive open licenses (FineWeb-Edu CC-BY, FineTome Apache 2.0). The Sonnet 4.6 and Opus 4.6 distillation datasets are used under their respective HuggingFace repository terms.
+
+This workspace is a private research project. The FANT 3 architecture is original; it draws on and cites the published papers listed above.
