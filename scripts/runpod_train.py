@@ -149,90 +149,140 @@ def make_batch_sampler(stream, tok, batch_size, seq_len, pad_id, eos_id,
         yield batch, targets
 
 
+def _init_distributed():
+    """Detect torchrun environment and initialise NCCL process group.
+    Returns (rank, local_rank, world_size, is_main). Single-GPU path
+    returns (0, 0, 1, True)."""
+    if "RANK" in os.environ and "LOCAL_RANK" in os.environ:
+        import torch.distributed as dist
+        dist.init_process_group(backend="nccl")
+        rank = dist.get_rank()
+        local_rank = int(os.environ["LOCAL_RANK"])
+        world_size = dist.get_world_size()
+        torch.cuda.set_device(local_rank)
+        return rank, local_rank, world_size, (rank == 0)
+    return 0, 0, 1, True
+
+
 def main():
     args = parse_args()
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    dtype  = torch.bfloat16 if device == 'cuda' else torch.float32
-    print(f'device={device}  dtype={dtype}  ckpt_dir={args.ckpt_dir}')
-    args.ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    rank, local_rank, world_size, is_main = _init_distributed()
+    is_distributed = world_size > 1
+
+    if torch.cuda.is_available():
+        device = f"cuda:{local_rank}" if is_distributed else "cuda"
+    else:
+        device = "cpu"
+    dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
+
+    def log(*a, **kw):
+        if is_main:
+            print(*a, **kw, flush=True)
+
+    log(f"device={device}  dtype={dtype}  ckpt_dir={args.ckpt_dir}")
+    log(f"distributed={is_distributed}  world_size={world_size}  rank={rank}  local_rank={local_rank}")
+    if is_main:
+        args.ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     # Config + model
     cfg = build_cfg(scale=args.scale, max_seq_len=args.max_seq_len)
-    print(f'scale={args.scale}  max_seq_len={cfg.max_seq_len}')
+    log(f"scale={args.scale}  max_seq_len={cfg.max_seq_len}")
     torch.manual_seed(0); np.random.seed(0)
     model = FANT3Model(cfg).to(dtype=dtype, device=device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f'model built: {n_params/1e6:.2f} M params')
+    log(f"model built: {n_params/1e6:.2f} M params")
 
     # Tokenizer + vocab alignment
     from tokenizers import Tokenizer
     tok_path = _ROOT / "output" / "tokenizer" / "tokenizer_v2.json"
     tok = Tokenizer.from_file(str(tok_path))
     V = tok.get_vocab_size()
-    pad_id = tok.token_to_id('<|pad|>') or 0
-    eos_id = tok.token_to_id('<|eos|>') or 1
+    pad_id = tok.token_to_id("<|pad|>") or 0
+    eos_id = tok.token_to_id("<|eos|>") or 1
     if V != cfg.vocab_size:
-        print(f'aligning cfg.vocab_size {cfg.vocab_size} -> {V}')
+        log(f"aligning cfg.vocab_size {cfg.vocab_size} -> {V}")
         cfg.vocab_size = V
         torch.manual_seed(0); np.random.seed(0)
         model = FANT3Model(cfg).to(dtype=dtype, device=device)
 
-    # Tier 3 fp32 tied tok_emb/lm_head promotion (the fix that unstuck the 1B run)
+    # Tier 3 fp32 tied tok_emb/lm_head promotion — MUST happen BEFORE DDP wrap
+    # because DDP bucketizes params by dtype at construction.
     if not args.no_fp32_tied:
         with torch.no_grad():
             model.tok_emb.weight.data = model.tok_emb.weight.data.float()
         assert model.lm_head.weight.data_ptr() == model.tok_emb.weight.data_ptr()
-        print(f'tied emb/lm_head -> fp32  ({model.tok_emb.weight.dtype})')
+        log(f"tied emb/lm_head -> fp32  ({model.tok_emb.weight.dtype})")
+
+    # Resume BEFORE DDP wrap so state_dict maps to bare module params.
+    start_step = 0
+    loss_hist = []
+    if args.resume is not None and args.resume.exists():
+        log(f"resuming from {args.resume}")
+        state = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(state["model"])
+        start_step = int(state.get("step", 0))
+        loss_hist = list(state.get("extra", {}).get("loss_hist", []))
+        log(f"  loaded model state, resume at step {start_step+1}")
+
+    # Wrap in DDP if distributed
+    if is_distributed:
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank,
+                    find_unused_parameters=True)   # MoE routing makes some params unused per-batch
+        inner = model.module
+    else:
+        inner = model
 
     # Decontamination filter
     from scripts.decontaminate import is_contaminated, build_hash_cache
     _cache = build_hash_cache(rebuild=False)
-    print(f'decontamination hashes: {sum(len(v) for v in _cache.values())}')
+    log(f"decontamination hashes: {sum(len(v) for v in _cache.values())}")
 
-    # Streams + samplers
-    stream_A = InterleavedMultiDatasetStream(PHASE_A_DATASETS, weights=PHASE_A_WEIGHTS, seed=0)
-    stream_B = InterleavedMultiDatasetStream(PHASE_B_DATASETS, weights=PHASE_B_WEIGHTS, seed=1)
+    # Streams + samplers — each rank gets a different seed so they see different
+    # interleaved sequences. InterleavedMultiDatasetStream is a stateless iterator
+    # over HF streaming datasets; there's no cross-rank coordination needed.
+    stream_A = InterleavedMultiDatasetStream(PHASE_A_DATASETS, weights=PHASE_A_WEIGHTS, seed=rank)
+    stream_B = InterleavedMultiDatasetStream(PHASE_B_DATASETS, weights=PHASE_B_WEIGHTS, seed=rank + 1000)
     sampler_A = make_batch_sampler(stream_A, tok, args.batch_size, args.seq_len_a,
-                                   pad_id, eos_id, pack_mode='per_row',
+                                   pad_id, eos_id, pack_mode="per_row",
                                    max_row_tokens=args.seq_len_a, is_contaminated=is_contaminated)
     sampler_B = make_batch_sampler(stream_B, tok, args.batch_size, args.seq_len_b,
-                                   pad_id, eos_id, pack_mode='per_row',
+                                   pad_id, eos_id, pack_mode="per_row",
                                    max_row_tokens=args.seq_len_b, is_contaminated=is_contaminated)
 
-    # Optimiser (bf16 params + 8-bit Adam state)
+    # Optimiser (bf16 params + 8-bit Adam state) — construct AFTER DDP wrap so
+    # it walks model.parameters() correctly.
     import bitsandbytes as bnb
     optim = bnb.optim.AdamW8bit(model.parameters(), lr=args.peak_lr,
                                 betas=(0.9, 0.95), weight_decay=0.1, eps=1e-8)
 
-    def lr_at(step):
-        return args.peak_lr * schedule_multiplier(step, args.warmup_steps, args.total_steps, 'litim')
-
-    # Resume
-    start_step = 0
-    loss_hist = []
+    # Optim-state resume happens after optimiser construction
     if args.resume is not None and args.resume.exists():
-        print(f'resuming from {args.resume}')
         state = torch.load(args.resume, map_location=device, weights_only=False)
-        model.load_state_dict(state['model'])
-        if 'optim' in state:
-            optim.load_state_dict(state['optim'])
-        start_step = int(state.get('step', 0))
-        loss_hist = list(state.get('extra', {}).get('loss_hist', []))
-        print(f'  loaded, resume at step {start_step+1}')
+        if "optim" in state:
+            optim.load_state_dict(state["optim"])
+            log("  loaded optimiser state")
+
+    def lr_at(step):
+        return args.peak_lr * schedule_multiplier(step, args.warmup_steps, args.total_steps, "litim")
 
     if args.dry_run:
-        print('dry run: skipping training loop')
+        log("dry run: skipping training loop")
+        if is_distributed:
+            import torch.distributed as dist
+            dist.destroy_process_group()
         return
 
     # Training loop
     nan_total = 0; consec_nan = 0
     grad_norm_hist = []
     start = time.time()
-    if device == 'cuda':
+    if device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats()
 
     for step in range(start_step + 1, args.total_steps + 1):
-        model.set_global_step(step)
+        inner.set_global_step(step)
         sampler = sampler_A if step <= args.phase_a_steps else sampler_B
         phase_tag = 'A' if step <= args.phase_a_steps else 'B'
         cur_lr = lr_at(step)
@@ -244,47 +294,55 @@ def main():
         n_ok = 0; n_nan = 0
         max_logit = 0.0; max_rtr = 0.0
 
-        for _ in range(args.grad_accum):
+        for micro_i in range(args.grad_accum):
             ids, targets = next(sampler)
             ids = ids.to(device); targets = targets.to(device)
             store_now = (step % args.store_every == 0)
-            out = model(ids, targets=targets, store_to_memory=store_now)
-
-            z_sum = 0.0
-            for ri in (out.get('router_infos') or []):
-                z = ri.get('z_loss')
-                if z is not None: z_sum = z_sum + z
-                mp_lg = ri.get('mp_logits')
-                if mp_lg is not None:
-                    mla = float(mp_lg.abs().max())
-                    if mla > max_rtr: max_rtr = mla
-
-            total = out['loss'] + args.z_coef * z_sum
-            loss_scaled = total / args.grad_accum
-
-            if torch.isfinite(loss_scaled):
-                loss_scaled.backward()
-                step_loss += float(out['loss'])
-                step_z += float(z_sum) if isinstance(z_sum, torch.Tensor) else 0.0
-                n_ok += 1
-                if 'logits' in out:
-                    mla = float(out['logits'].abs().max())
-                    if mla > max_logit: max_logit = mla
+            # Under DDP, only sync gradients on the final micro of a grad-accum
+            # group to avoid O(grad_accum) all-reduces per step.
+            if is_distributed and micro_i < args.grad_accum - 1:
+                sync_ctx = model.no_sync()
             else:
-                n_nan += 1
+                from contextlib import nullcontext
+                sync_ctx = nullcontext()
+            with sync_ctx:
+                out = model(ids, targets=targets, store_to_memory=store_now)
+
+                z_sum = 0.0
+                for ri in (out.get('router_infos') or []):
+                    z = ri.get('z_loss')
+                    if z is not None: z_sum = z_sum + z
+                    mp_lg = ri.get('mp_logits')
+                    if mp_lg is not None:
+                        mla = float(mp_lg.abs().max())
+                        if mla > max_rtr: max_rtr = mla
+
+                total = out['loss'] + args.z_coef * z_sum
+                loss_scaled = total / args.grad_accum
+
+                if torch.isfinite(loss_scaled):
+                    loss_scaled.backward()
+                    step_loss += float(out['loss'])
+                    step_z += float(z_sum) if isinstance(z_sum, torch.Tensor) else 0.0
+                    n_ok += 1
+                    if 'logits' in out:
+                        mla = float(out['logits'].abs().max())
+                        if mla > max_logit: max_logit = mla
+                else:
+                    n_nan += 1
             del ids, targets, total, loss_scaled
 
         if n_ok == 0:
             optim.zero_grad(set_to_none=True)
             loss_hist.append(float('nan'))
             nan_total += 1; consec_nan += 1
-            print(f'  [NaN] step={step} all {args.grad_accum} micros NaN ({consec_nan}/{args.max_nan_steps})')
+            log(f'  [NaN] step={step} all {args.grad_accum} micros NaN ({consec_nan}/{args.max_nan_steps})')
             if consec_nan >= args.max_nan_steps:
-                print(f'STOP: {consec_nan} consecutive NaN at step {step}')
+                log(f'STOP: {consec_nan} consecutive NaN at step {step}')
                 break
         else:
             if n_nan > 0:
-                print(f'  [NaN-mix] step={step} {n_nan}/{args.grad_accum} micros NaN')
+                log(f'  [NaN-mix] step={step} {n_nan}/{args.grad_accum} micros NaN')
                 nan_total += 1
             gn = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             grad_norm_hist.append(float(gn))
@@ -292,36 +350,42 @@ def main():
             loss_hist.append(step_loss / max(n_ok, 1))
             consec_nan = 0
 
-        if step % 4 == 0 and device == 'cuda':
+        if step % 4 == 0 and device.startswith("cuda"):
             torch.cuda.empty_cache()
 
         if step % args.log_every == 0 or step == start_step + 1:
             elapsed = time.time() - start
-            vram = torch.cuda.max_memory_allocated() / 1e9 if device == 'cuda' else 0.0
+            vram = torch.cuda.max_memory_allocated() / 1e9 if device.startswith("cuda") else 0.0
             cur_gn = grad_norm_hist[-1] if grad_norm_hist else 0.0
-            mstats = model.memory.get_stats() if hasattr(model, 'memory') else {}
-            print(f'[{phase_tag} T={args.seq_len_a if phase_tag=="A" else args.seq_len_b}] '
-                  f'step={step:5d} lr={cur_lr:.2e} loss={loss_hist[-1]:.4f} z={step_z:.3f} '
-                  f'gn={cur_gn:.2f} max|logit|={max_logit:.1f} max|rtr|={max_rtr:.1f} '
-                  f'vram={vram:.1f}GB chirality={mstats.get("chirality_balance", 0.0):.3f} '
-                  f'nan_total={nan_total} elapsed={elapsed/60:.1f}m', flush=True)
-            if device == 'cuda':
+            mstats = inner.memory.get_stats() if hasattr(inner, 'memory') else {}
+            log(f'[{phase_tag} T={args.seq_len_a if phase_tag=="A" else args.seq_len_b}] '
+                f'step={step:5d} lr={cur_lr:.2e} loss={loss_hist[-1]:.4f} z={step_z:.3f} '
+                f'gn={cur_gn:.2f} max|logit|={max_logit:.1f} max|rtr|={max_rtr:.1f} '
+                f'vram={vram:.1f}GB x{world_size} chirality={mstats.get("chirality_balance", 0.0):.3f} '
+                f'nan_total={nan_total} elapsed={elapsed/60:.1f}m')
+            if device.startswith("cuda"):
                 torch.cuda.reset_peak_memory_stats()
 
-        if step % args.ckpt_every == 0 or step == args.phase_a_steps or step == args.total_steps:
+        # Only rank 0 saves. Every rank has identical weights post-step under DDP,
+        # so rank-0 state_dict is representative. Use inner.state_dict() (not the
+        # DDP wrapper) so resume works under any world_size.
+        if is_main and (step % args.ckpt_every == 0 or step == args.phase_a_steps or step == args.total_steps):
             path = args.ckpt_dir / f'step_{step:05d}.pt'
-            payload = {'model': model.state_dict(), 'optim': optim.state_dict(),
+            payload = {'model': inner.state_dict(), 'optim': optim.state_dict(),
                        'step': step, 'cfg': cfg.__dict__,
                        'extra': {'loss_hist': loss_hist[-args.ckpt_every:], 'phase': phase_tag,
-                                 'nan_total': nan_total}}
+                                 'nan_total': nan_total, 'world_size': world_size}}
             torch.save(payload, path)
             sz = path.stat().st_size / 1e9
             print(f'  [ckpt] step={step} -> {path}  size={sz:.2f} GB', flush=True)
             _gc.collect()
-            if device == 'cuda': torch.cuda.empty_cache()
+            if device.startswith("cuda"): torch.cuda.empty_cache()
 
-    print(f'training complete in {(time.time()-start)/3600:.2f} h')
-    print(f'NaN steps: {nan_total} / {args.total_steps}')
+    log(f'training complete in {(time.time()-start)/3600:.2f} h')
+    log(f'NaN steps: {nan_total} / {args.total_steps}')
+    if is_distributed:
+        import torch.distributed as dist
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
