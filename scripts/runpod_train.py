@@ -35,7 +35,7 @@ import torch
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from fant3.config import fant3_1b, fant3_20m, fant3_10m, fant3_15m, fant3_80m
+from fant3.config import fant3_1b, fant3_20m, fant3_10m, fant3_15m, fant3_80m, fant3_50m
 from fant3.model.fant3_model import FANT3Model
 from fant3.training import precondition_router_grads_, schedule_multiplier
 from fant2.data.streaming import InterleavedMultiDatasetStream
@@ -62,13 +62,17 @@ def parse_args():
     p.add_argument("--z-coef", type=float, default=1e-4)
     p.add_argument("--log-every", type=int, default=25)
     p.add_argument("--ckpt-every", type=int, default=500)
+    p.add_argument("--ckpt-keep-last", type=int, default=0,
+                   help="if >0, keep only the N most recent checkpoints (by mtime) — "
+                        "plus phase_A_end and total_steps milestones which are always kept. "
+                        "Prevents volume fill on long unlimited runs. Default 0 = keep all.")
     p.add_argument("--store-every", type=int, default=50)
     p.add_argument("--max-nan-steps", type=int, default=3)
     p.add_argument("--no-fp32-tied", action="store_true",
                    help="skip fp32 promotion of tied tok_emb/lm_head (default: promote)")
-    p.add_argument("--scale", choices=["1b", "80m", "25m", "15m", "10m"], default="1b",
-                   help="model preset: 1b=fant3_1b (default), 80m=fant3_80m (~88M stored, "
-                        "Chinchilla-sized for 2x Blackwell + $19 budget), "
+    p.add_argument("--scale", choices=["1b", "80m", "50m", "25m", "15m", "10m"], default="1b",
+                   help="model preset: 1b=fant3_1b (default, ~1.0B stored), "
+                        "80m=fant3_80m (88.69M stored), 50m=fant3_50m (50.79M stored), "
                         "25m=fant3_20m (23.5M stored), 15m=fant3_15m (14.6M stored), "
                         "10m=fant3_10m (9.5M stored)")
     p.add_argument("--max-seq-len", type=int, default=None,
@@ -91,8 +95,8 @@ def parse_args():
 
 
 def build_cfg(scale="1b", max_seq_len=None):
-    preset_map = {"1b": fant3_1b, "80m": fant3_80m, "25m": fant3_20m,
-                  "15m": fant3_15m, "10m": fant3_10m}
+    preset_map = {"1b": fant3_1b, "80m": fant3_80m, "50m": fant3_50m,
+                  "25m": fant3_20m, "15m": fant3_15m, "10m": fant3_10m}
     cfg = preset_map[scale]()
     if max_seq_len is not None:
         cfg.max_seq_len = max_seq_len
@@ -453,8 +457,14 @@ def main():
         # Only rank 0 saves. Every rank has identical weights post-step under DDP,
         # so rank-0 state_dict is representative. Use inner.state_dict() (not the
         # DDP wrapper) so resume works under any world_size.
-        if is_main and (step % args.ckpt_every == 0 or step == args.phase_a_steps or step == args.total_steps):
+        is_milestone = (step == args.phase_a_steps or step == args.total_steps)
+        is_rolling   = (step % args.ckpt_every == 0)
+        if is_main and (is_rolling or is_milestone):
             path = args.ckpt_dir / f'step_{step:05d}.pt'
+            if is_milestone:
+                # stash milestones in a named copy so rolling-trim doesn't delete them
+                milestone_suffix = "_phaseA" if step == args.phase_a_steps else "_final"
+                path = args.ckpt_dir / f'step_{step:05d}{milestone_suffix}.pt'
             payload = {'model': inner.state_dict(), 'optim': optim.state_dict(),
                        'step': step, 'cfg': cfg.__dict__,
                        'extra': {'loss_hist': loss_hist[-args.ckpt_every:], 'phase': phase_tag,
@@ -462,6 +472,21 @@ def main():
             torch.save(payload, path)
             sz = path.stat().st_size / 1e9
             print(f'  [ckpt] step={step} -> {path}  size={sz:.2f} GB', flush=True)
+
+            # Rolling-keep trim on the non-milestone ckpts only (milestones are named
+            # with _phaseA or _final suffix and are never deleted by this sweep).
+            if args.ckpt_keep_last > 0:
+                import glob as _glob
+                rolling = [p for p in _glob.glob(str(args.ckpt_dir / 'step_*.pt'))
+                           if not (p.endswith('_phaseA.pt') or p.endswith('_final.pt'))]
+                rolling.sort(key=lambda p: os.path.getmtime(p))
+                for old in rolling[:-args.ckpt_keep_last]:
+                    try:
+                        os.remove(old)
+                        print(f'  [rolling] removed {os.path.basename(old)}', flush=True)
+                    except OSError as e:
+                        print(f'  [rolling] couldn\'t remove {old}: {e}', flush=True)
+
             _gc.collect()
             if device.startswith("cuda"): torch.cuda.empty_cache()
 
