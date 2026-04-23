@@ -35,7 +35,7 @@ import torch
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from fant3.config import fant3_1b, fant3_20m, fant3_10m, fant3_15m
+from fant3.config import fant3_1b, fant3_20m, fant3_10m, fant3_15m, fant3_80m
 from fant3.model.fant3_model import FANT3Model
 from fant3.training import precondition_router_grads_, schedule_multiplier
 from fant2.data.streaming import InterleavedMultiDatasetStream
@@ -66,18 +66,33 @@ def parse_args():
     p.add_argument("--max-nan-steps", type=int, default=3)
     p.add_argument("--no-fp32-tied", action="store_true",
                    help="skip fp32 promotion of tied tok_emb/lm_head (default: promote)")
-    p.add_argument("--scale", choices=["1b", "25m", "15m", "10m"], default="1b",
-                   help="model preset: 1b=fant3_1b (default), 25m=fant3_20m (23.5M stored), "
-                        "15m=fant3_15m (14.6M stored), 10m=fant3_10m (9.5M stored)")
+    p.add_argument("--scale", choices=["1b", "80m", "25m", "15m", "10m"], default="1b",
+                   help="model preset: 1b=fant3_1b (default), 80m=fant3_80m (~88M stored, "
+                        "Chinchilla-sized for 2x Blackwell + $19 budget), "
+                        "25m=fant3_20m (23.5M stored), 15m=fant3_15m (14.6M stored), "
+                        "10m=fant3_10m (9.5M stored)")
     p.add_argument("--max-seq-len", type=int, default=None,
                    help="override cfg.max_seq_len (default: preset value)")
     p.add_argument("--dry-run", action="store_true",
                    help="build model + load ckpt, print shapes, don't train")
+
+    # Experiment tracking + secrets
+    p.add_argument("--wandb-project", default=None,
+                   help="W&B project name. If set, wandb.init is called and loss/gn/lr are logged every step. "
+                        "Requires WANDB_API_KEY env var (set via RunPod pod secrets, NOT in clear text).")
+    p.add_argument("--wandb-entity", default=None,
+                   help="W&B entity (user or team). Optional; defaults to the API key's default.")
+    p.add_argument("--wandb-run-name", default=None,
+                   help="W&B run name. Optional; auto-generated if omitted.")
+    p.add_argument("--hf-login", action="store_true",
+                   help="Call huggingface_hub.login() with the HF_TOKEN env var. Required for "
+                        "gated datasets like nvidia/Nemotron-CC-v2.1.")
     return p.parse_args()
 
 
 def build_cfg(scale="1b", max_seq_len=None):
-    preset_map = {"1b": fant3_1b, "25m": fant3_20m, "15m": fant3_15m, "10m": fant3_10m}
+    preset_map = {"1b": fant3_1b, "80m": fant3_80m, "25m": fant3_20m,
+                  "15m": fant3_15m, "10m": fant3_10m}
     cfg = preset_map[scale]()
     if max_seq_len is not None:
         cfg.max_seq_len = max_seq_len
@@ -184,6 +199,58 @@ def main():
     log(f"distributed={is_distributed}  world_size={world_size}  rank={rank}  local_rank={local_rank}")
     if is_main:
         args.ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- HuggingFace auth (optional) ---
+    # Enables gated datasets (nvidia/Nemotron-CC-v2.1, Math-v1, Code-v1, etc).
+    # Token MUST come from HF_TOKEN env var; never passed as CLI arg so it
+    # doesn't appear in shell history or process listing.
+    if args.hf_login:
+        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        if not hf_token:
+            log("WARN --hf-login passed but HF_TOKEN env var is unset; continuing without auth.")
+        else:
+            try:
+                from huggingface_hub import login as hf_login_fn
+                hf_login_fn(token=hf_token, add_to_git_credential=False)
+                log("HF authenticated via HF_TOKEN env var")
+            except Exception as e:
+                log(f"WARN HF login failed: {type(e).__name__}: {e}")
+
+    # --- Weights & Biases init (rank-0 only) ---
+    # API key MUST come from WANDB_API_KEY env var.
+    wandb_run = None
+    if is_main and args.wandb_project is not None:
+        try:
+            import wandb
+            if os.environ.get("WANDB_API_KEY") is None:
+                log("WARN --wandb-project set but WANDB_API_KEY env var is unset; skipping wandb init.")
+            else:
+                wandb_run = wandb.init(
+                    project=args.wandb_project,
+                    entity=args.wandb_entity,
+                    name=args.wandb_run_name,
+                    config={
+                        "scale": args.scale,
+                        "peak_lr": args.peak_lr,
+                        "batch_size": args.batch_size,
+                        "grad_accum": args.grad_accum,
+                        "seq_len_a": args.seq_len_a,
+                        "seq_len_b": args.seq_len_b,
+                        "warmup_steps": args.warmup_steps,
+                        "total_steps": args.total_steps,
+                        "phase_a_steps": args.phase_a_steps,
+                        "z_coef": args.z_coef,
+                        "grad_clip": args.grad_clip,
+                        "max_seq_len": args.max_seq_len,
+                        "world_size": world_size,
+                        "resume": str(args.resume) if args.resume else None,
+                    },
+                )
+                log(f"wandb: initialized project={args.wandb_project} run={wandb_run.name}")
+        except ImportError:
+            log("WARN wandb not installed; skipping. Install via: pip install wandb")
+        except Exception as e:
+            log(f"WARN wandb init failed: {type(e).__name__}: {e}")
 
     # Config + model
     cfg = build_cfg(scale=args.scale, max_seq_len=args.max_seq_len)
@@ -363,6 +430,23 @@ def main():
                 f'gn={cur_gn:.2f} max|logit|={max_logit:.1f} max|rtr|={max_rtr:.1f} '
                 f'vram={vram:.1f}GB x{world_size} chirality={mstats.get("chirality_balance", 0.0):.3f} '
                 f'nan_total={nan_total} elapsed={elapsed/60:.1f}m')
+            if wandb_run is not None:
+                wandb_run.log({
+                    "step": step,
+                    "phase": phase_tag,
+                    "loss": loss_hist[-1] if loss_hist[-1] == loss_hist[-1] else float('nan'),
+                    "lr": cur_lr,
+                    "z_loss": step_z,
+                    "grad_norm": cur_gn,
+                    "max_logit": max_logit,
+                    "max_router_logit": max_rtr,
+                    "vram_gb": vram,
+                    "chirality_balance": mstats.get("chirality_balance", 0.0),
+                    "pq_overlap_mean": mstats.get("pq_overlap_mean", 0.0),
+                    "chsh_s": mstats.get("chsh_S", 0.0),
+                    "nan_total": nan_total,
+                    "elapsed_min": elapsed / 60.0,
+                }, step=step)
             if device.startswith("cuda"):
                 torch.cuda.reset_peak_memory_stats()
 
@@ -383,6 +467,8 @@ def main():
 
     log(f'training complete in {(time.time()-start)/3600:.2f} h')
     log(f'NaN steps: {nan_total} / {args.total_steps}')
+    if wandb_run is not None:
+        wandb_run.finish()
     if is_distributed:
         import torch.distributed as dist
         dist.destroy_process_group()

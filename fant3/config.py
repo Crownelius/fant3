@@ -252,6 +252,40 @@ def fant3_15m() -> FANT3Config:
     )
 
 
+def fant3_80m() -> FANT3Config:
+    """~80M Chinchilla-optimal preset (2026-04-23).
+
+    Designed for the 2x RTX PRO 6000 Blackwell budget regime on RunPod
+    (~$4/hr combined). With $19 = 4.75h of compute, realistic tokens
+    throughput is ~100K tok/sec DDP at this scale = 1.7B tokens =
+    exactly 20 tokens/param (Chinchilla-optimal).
+
+    Target: ~80M stored. Scales up from fant3_50m by widening dim
+    320 -> 448 and moe_hidden 640 -> 896, keeping n_layers=10 and the
+    rest of the architecture identical.
+    """
+    # Architecture calibrated empirically: FANT 3 caps n_suffix at min(3, ...)
+    # in the model builder, so the only scaling levers at fixed n_layers are
+    # dim, moe_hidden, and expert count.
+    return FANT3Config(
+        dim=512, n_layers=10, n_dense_layers=2,
+        n_heads=8, n_kv_heads=2, head_dim=64,
+        n_megapools=2, n_per_megapool=4, top_k=2,   # 8 experts
+        n_matryoshka_levels=2,
+        shared_expert_hidden=384, moe_hidden=1280,
+        n_attention_atoms=4, masa_coef_rank=8,
+        n_recursion_depths=2,
+        kron_A_p=16, kron_A_q=8, kron_B_p=16, kron_B_q=16, kron_C_p=16, kron_C_q=16,
+        max_seq_len=1024,
+        cerebellum_enabled=False,             # 25M fixed budget dwarfs model at this scale
+        ahn_enabled=False,
+        apollonian_alpha_cap=2000, apollonian_beta_cap=2000,
+        apollonian_retrieval_layers=(8, 9),
+        etf_freeze_after_step=2000,
+        etf_freeze_layers=tuple(range(2, 8)),
+    )
+
+
 def fant3_20m() -> FANT3Config:
     """20M chat-optimized preset (2026-04-19).
 

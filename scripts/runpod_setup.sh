@@ -40,7 +40,8 @@ ${PY} -m pip install --quiet \
     scipy \
     huggingface_hub \
     numpy \
-    matplotlib
+    matplotlib \
+    wandb
 
 # ----- Sanity: print torch / cuda info -----
 ${PY} - <<'PY'
