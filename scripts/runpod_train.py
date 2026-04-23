@@ -35,7 +35,7 @@ import torch
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from fant3.config import fant3_1b, fant3_20m
+from fant3.config import fant3_1b, fant3_20m, fant3_10m, fant3_15m
 from fant3.model.fant3_model import FANT3Model
 from fant3.training import precondition_router_grads_, schedule_multiplier
 from fant2.data.streaming import InterleavedMultiDatasetStream
@@ -66,8 +66,9 @@ def parse_args():
     p.add_argument("--max-nan-steps", type=int, default=3)
     p.add_argument("--no-fp32-tied", action="store_true",
                    help="skip fp32 promotion of tied tok_emb/lm_head (default: promote)")
-    p.add_argument("--scale", choices=["1b", "25m"], default="1b",
-                   help="model preset: 1b=fant3_1b (default), 25m=fant3_20m (23.5M stored)")
+    p.add_argument("--scale", choices=["1b", "25m", "15m", "10m"], default="1b",
+                   help="model preset: 1b=fant3_1b (default), 25m=fant3_20m (23.5M stored), "
+                        "15m=fant3_15m (14.6M stored), 10m=fant3_10m (9.5M stored)")
     p.add_argument("--max-seq-len", type=int, default=None,
                    help="override cfg.max_seq_len (default: preset value)")
     p.add_argument("--dry-run", action="store_true",
@@ -76,7 +77,8 @@ def parse_args():
 
 
 def build_cfg(scale="1b", max_seq_len=None):
-    cfg = fant3_20m() if scale == "25m" else fant3_1b()
+    preset_map = {"1b": fant3_1b, "25m": fant3_20m, "15m": fant3_15m, "10m": fant3_10m}
+    cfg = preset_map[scale]()
     if max_seq_len is not None:
         cfg.max_seq_len = max_seq_len
     cfg.use_gradient_checkpointing  = True

@@ -191,6 +191,67 @@ def fant3_smoke() -> FANT3Config:
     )
 
 
+def fant3_10m() -> FANT3Config:
+    """~10M preset for budget Chinchilla-optimal runs (2026-04-23).
+
+    Designed for the $15-30 RunPod budget range. At Chinchilla (~20 tok/param)
+    = 200M tokens = ~3100 steps at T=16384 B=1 accum=4 = ~4 hours on H100.
+
+    Architecture is minimal: the tied tok_emb + lm_head alone at vocab 32736
+    consume 6.29M params (63% of total), so everything else must be aggressive.
+    Cerebellum + AHN disabled (they carry fixed budget regardless of model
+    size). MoR kept at depth 2 since it's cheap and load-bearing for the
+    CERN-inspired physics path.
+
+    Target: ~10M stored (measure to confirm).
+    """
+    return FANT3Config(
+        dim=192, n_layers=6, n_dense_layers=1,
+        n_heads=4, n_kv_heads=2, head_dim=48,
+        n_megapools=2, n_per_megapool=2, top_k=1,   # 4 experts total
+        n_matryoshka_levels=2,
+        shared_expert_hidden=128, moe_hidden=256,
+        n_attention_atoms=3, masa_coef_rank=4,
+        n_recursion_depths=2,
+        kron_A_p=4, kron_A_q=4, kron_B_p=8, kron_B_q=6, kron_C_p=6, kron_C_q=8,
+        max_seq_len=1024,
+        cerebellum_enabled=False,            # 25M budget killer at this scale
+        ahn_enabled=False,                    # same
+        apollonian_alpha_cap=500, apollonian_beta_cap=500,
+        apollonian_retrieval_layers=(4, 5),  # last 2 of 6
+        etf_freeze_after_step=1000,
+        etf_freeze_layers=tuple(range(1, 5)),
+    )
+
+
+def fant3_15m() -> FANT3Config:
+    """~15M preset (2026-04-23).
+
+    Sweet spot for a small but capacity-respectable run on $30-40 budget.
+    Chinchilla = 300M tokens = ~4600 steps at T=16384 B=1 accum=4 =
+    ~6 hours on H100.
+
+    Target: ~15M stored.
+    """
+    return FANT3Config(
+        dim=256, n_layers=6, n_dense_layers=1,
+        n_heads=4, n_kv_heads=2, head_dim=64,
+        n_megapools=2, n_per_megapool=2, top_k=1,   # 4 experts total
+        n_matryoshka_levels=2,
+        shared_expert_hidden=192, moe_hidden=384,
+        n_attention_atoms=3, masa_coef_rank=4,
+        n_recursion_depths=2,
+        kron_A_p=8, kron_A_q=4, kron_B_p=8, kron_B_q=8, kron_C_p=8, kron_C_q=8,
+        max_seq_len=1024,
+        cerebellum_enabled=False,
+        ahn_enabled=False,
+        apollonian_alpha_cap=500, apollonian_beta_cap=500,
+        apollonian_retrieval_layers=(4, 5),
+        etf_freeze_after_step=1000,
+        etf_freeze_layers=tuple(range(1, 5)),
+    )
+
+
 def fant3_20m() -> FANT3Config:
     """20M chat-optimized preset (2026-04-19).
 
