@@ -64,7 +64,9 @@ class MatryoshkaRouter(nn.Module):
         self.n_levels    = cfg.n_matryoshka_levels
         self.n_per_mp    = cfg.n_per_megapool
 
-        # Nested band sizes: 1, 2, 4, 8, ...
+        # Nested band sizes: 1, 2, 4, 8, ... (MERA-style scale-invariant tree,
+        # Belin-Myers-Ruan-Sárosi-Speranza CDS 2837843). For full MERA coverage
+        # set cfg.n_matryoshka_levels = floor(log2(n_per_megapool)) + 1.
         # Last level is capped at n_per_megapool.
         self.band_sizes = []
         for lv in range(self.n_levels):
@@ -118,6 +120,11 @@ class MatryoshkaRouter(nn.Module):
                 self.megapool_load_ema.mul_(self.ema_decay).add_((1 - self.ema_decay) * mp_load)
                 self.level_load_ema.mul_(self.ema_decay).add_((1 - self.ema_decay) * lv_load)
 
+        # OLMoE-style z-loss of BOTH logit projections. Sum to total loss with
+        # a small coefficient (~1e-4) to keep router logits bounded. Without
+        # this the router drifts unbounded and MoE collapses (+NaN CE).
+        z = self.z_loss(mp_logits, lv_logits)
+
         return {
             "mp_logits":  mp_logits,
             "mp_probs":   mp_probs,
@@ -126,7 +133,23 @@ class MatryoshkaRouter(nn.Module):
             "band_sizes": self.band_sizes,
             "mp_idx":     mp_idx,
             "lv_idx":     lv_idx,
+            "mp_replicon": self.compute_replicon(mp_logits),
+            "lv_replicon": self.compute_replicon(lv_logits),
+            "z_loss":     z,
         }
+
+    @staticmethod
+    def compute_replicon(logits: torch.Tensor, temperature: float = 1.0,
+                         capacity_factor: float = 1.0) -> torch.Tensor:
+        # Ritort AT-line replicon eigenvalue (CERN CDS 263665). Positive value
+        # = routing on the unstable side of replica-symmetry breaking (expert
+        # collapse imminent). Logged as scalar diagnostic; no gradient path.
+        with torch.no_grad():
+            if logits.shape[-1] < 2:
+                return logits.new_zeros(())
+            top2 = torch.topk(logits, k=2, dim=-1).values
+            gap = top2[..., 0] - top2[..., 1]
+            return gap.var() - (temperature * capacity_factor) ** 2
 
     # -------------------------------------------------------------------------
     #  Auxiliary losses

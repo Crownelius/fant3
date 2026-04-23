@@ -56,6 +56,7 @@ References
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Optional
 
 import torch
@@ -488,12 +489,76 @@ class SpinorApollonianMemory(nn.Module):
         )
         chirality_balance = float(alpha_n) / float(total) if total > 0 else 0.5
 
+        pq = self._sample_pq_overlap(n_samples=512)
+
         return {
             "alpha_fill":           alpha_n,
             "beta_fill":            beta_n,
             "alpha_curvature_mean": alpha_curv_mean,
             "beta_curvature_mean":  beta_curv_mean,
             "chirality_balance":    chirality_balance,
+            "pq_overlap_mean":      pq["mean"],
+            "pq_overlap_std":       pq["std"],
+            "pq_bimodality":        pq["bimodality"],
+            "chsh_S":               self.chsh_correlator(n_samples=512),
+        }
+
+    @torch.no_grad()
+    def chsh_correlator(self, n_samples: int = 512) -> float:
+        # Bell CHSH audit between alpha/beta chirality packs (Bell CERN CDS
+        # 111654). Picks four unit axes (a, a', b, b') in the 2D spinor plane
+        # and returns S = |E(a,b) + E(a,b') + E(a',b) - E(a',b')|. Classical
+        # hidden-variable bound is S <= 2; quantum bound is 2*sqrt(2) ≈ 2.828.
+        # When packs behave as entangled subsystems, S pushes past 2; when the
+        # chirality split has collapsed into a single local cluster, S falls
+        # toward 0. Dashboard metric, no gradient.
+        alpha_n = int(self.alpha_count.item())
+        beta_n  = int(self.beta_count.item())
+        if alpha_n == 0 or beta_n == 0:
+            return 0.0
+        n = min(n_samples, alpha_n, beta_n)
+        dev = self.alpha_spinor.device
+        ai = torch.randint(0, alpha_n, (n,), device=dev)
+        bi = torch.randint(0, beta_n,  (n,), device=dev)
+        sa = F.normalize(self.alpha_spinor[ai].float(), dim=-1)  # (n, 2)
+        sb = F.normalize(self.beta_spinor[bi].float(),  dim=-1)  # (n, 2)
+        a  = torch.tensor([1.0, 0.0], device=dev)
+        ap = torch.tensor([0.0, 1.0], device=dev)
+        b  = torch.tensor([math.cos(math.pi / 4), math.sin(math.pi / 4)], device=dev)
+        bp = torch.tensor([math.cos(math.pi / 4), -math.sin(math.pi / 4)], device=dev)
+        E = lambda u, v: ((sa @ u) * (sb @ v)).mean().item()
+        return abs(E(a, b) + E(a, bp) + E(ap, b) - E(ap, bp))
+
+    @torch.no_grad()
+    def _sample_pq_overlap(self, n_samples: int = 512) -> Dict[str, float]:
+        # Berg-Billoire-Janke (CERN CDS 782816): the two-replica overlap
+        # distribution P(q) of a spin glass is bimodal in the healthy
+        # two-cluster regime, delta-like on collapse, broad when over-mixed.
+        # Here "replicas" = alpha pack and beta pack. Overlap = cosine
+        # similarity between one sampled element from each. Bimodality index
+        # is |skew| * kurtosis_excess, larger = more bimodal structure.
+        alpha_n = int(self.alpha_count.item())
+        beta_n  = int(self.beta_count.item())
+        if alpha_n == 0 or beta_n == 0:
+            return {"mean": 0.0, "std": 0.0, "bimodality": 0.0}
+        n = min(n_samples, alpha_n, beta_n)
+        dev = self.alpha_emb.device
+        ai = torch.randint(0, alpha_n, (n,), device=dev)
+        bi = torch.randint(0, beta_n,  (n,), device=dev)
+        a = F.normalize(self.alpha_emb[ai].float(), dim=-1)
+        b = F.normalize(self.beta_emb[bi].float(),  dim=-1)
+        q = (a * b).sum(dim=-1)  # (n,) cosine overlaps
+        m  = q.mean()
+        sd = q.std()
+        if sd.item() < 1e-8:
+            return {"mean": float(m), "std": float(sd), "bimodality": 0.0}
+        z = (q - m) / sd
+        skew = (z ** 3).mean().abs()
+        kurt = (z ** 4).mean() - 3.0
+        return {
+            "mean":       float(m),
+            "std":        float(sd),
+            "bimodality": float(skew * kurt.clamp(min=0.0)),
         }
 
     # -----------------------------------------------------------------------

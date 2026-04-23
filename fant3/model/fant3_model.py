@@ -241,8 +241,14 @@ class FANT3Model(nn.Module):
         """
         B, T = input_ids.shape
 
-        # Token embed
+        # Token embed. Weight may be fp32 (Tier 3 bf16-ceiling fix); cast
+        # embedded activations back to the trunk's dtype for the transformer
+        # blocks. The weight itself stays in its own dtype so gradients land
+        # in fp32 when the tied emb/lm_head is promoted.
         x = self.tok_emb(input_ids)  # (B, T, dim)
+        trunk_dtype = next(iter(self.dense_blocks.parameters())).dtype
+        if x.dtype != trunk_dtype:
+            x = x.to(dtype=trunk_dtype)
 
         # Dense prefix
         for blk in self.dense_blocks:
@@ -251,7 +257,8 @@ class FANT3Model(nn.Module):
         # MoR middle (or fallback to distinct middle blocks)
         mor_info = None
         if self.mor is not None:
-            x, mor_info = self.mor(x)
+            retrieved = self._retrieve_for_mor(x)
+            x, mor_info = self.mor(x, retrieved=retrieved)
         elif hasattr(self, "middle_blocks"):
             for blk in self.middle_blocks:
                 x = blk(x)
@@ -281,14 +288,28 @@ class FANT3Model(nn.Module):
         x = self.final_norm(x)
         final_hidden = x
 
-        # LM head
+        # LM head. If lm_head.weight was promoted to fp32 (Tier 3), cast the
+        # hidden state to match before matmul so gradient lands in fp32 on the
+        # target weight. Gemma-2 / Chinchilla / many-recent-1B+ trainers do
+        # this for the tied embedding to escape the bf16 update-quantisation
+        # ceiling on lm_head target rows.
+        lm_dtype = self.lm_head.weight.dtype
+        if final_hidden.dtype != lm_dtype:
+            final_hidden = final_hidden.to(dtype=lm_dtype)
         logits = self.lm_head(final_hidden)  # (B, T, vocab_size)
 
-        # CE loss if targets given
+        # Optional soft-cap (Gemma-2 / Jamba): bounds softmax input so bf16
+        # overflow is impossible and routing saturates less aggressively.
+        cap = getattr(self.cfg, "lm_head_logit_cap", None)
+        if cap is not None and cap > 0:
+            logits = cap * torch.tanh(logits / cap)
+
+        # CE loss if targets given. fp32 cast kills bf16 overflow in log_softmax;
+        # tiny (B*T*V*4 vs *2 bytes) VRAM cost compared to what it buys.
         loss = None
         if targets is not None:
             loss = F.cross_entropy(
-                logits.reshape(-1, self.cfg.vocab_size),
+                logits.float().reshape(-1, self.cfg.vocab_size),
                 targets.reshape(-1),
                 ignore_index=-100,
             )
@@ -319,6 +340,34 @@ class FANT3Model(nn.Module):
         }
 
     # -------------------------------------------------------------------------
+
+    def set_global_step(self, step: int) -> None:
+        # Propagate the training-loop step into sub-modules that gate behaviour
+        # on it (currently: MoR Apollonian-channel warmup).
+        if self.mor is not None:
+            self.mor.current_step = int(step)
+
+    def _retrieve_for_mor(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        # MoR LTI apollonian channel: query Apollonian memory with x, aggregate
+        # top-k retrieved values via softmax-scored mean → (B, T, dim). Returns
+        # None when channel disabled or memory empty so MoR skips the C*retrieved
+        # term.
+        if self.mor is None or not self.mor.lti_enabled or not self.mor.lti_apollonian:
+            return None
+        total = 0
+        if self._memory_is_spinor:
+            total = int(self.memory.alpha_count.item()) + int(self.memory.beta_count.item())
+        else:
+            total = int(getattr(self.memory, "alpha_count", torch.tensor(0)).item()) \
+                  + int(getattr(self.memory, "beta_count",  torch.tensor(0)).item())
+        if total == 0:
+            return None
+        top_k = max(1, min(8, total))
+        res = self.memory.retrieve(x, top_k=top_k, pool="both")
+        values = res["values"]                              # (B, T, k, dim)
+        scores = res["scores"]                              # (B, T, k)
+        w = F.softmax(scores, dim=-1).unsqueeze(-1)         # (B, T, k, 1)
+        return (w * values).sum(dim=-2).to(x.dtype)         # (B, T, dim)
 
     def freeze_intermediate_routers_to_etf(self):
         """

@@ -17,6 +17,7 @@ Three presets:
 
 from __future__ import annotations
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -153,6 +154,16 @@ class FANT3Config:
     # channel is added only when BOTH this flag and spinor_apollonian_enabled
     # are True AND the memory pack has >0 items.
     mor_lti_apollonian_channel:     bool = True
+
+    # ------ CE stabilisation (Tier 1/2 landed 2026-04-22) --------------------
+    # LM head logit soft-cap (Gemma-2 style): logits = cap * tanh(logits / cap).
+    # Bounds softmax input; kills bf16 overflow + stabilises MoE router.
+    # None = off. Recommended value at 1B scale: 30.0.
+    lm_head_logit_cap:               Optional[float] = None
+    # MoR C channel warmup — delay the Apollonian-retrieved memory injection
+    # into MoR until step N, so freshly-filled packs don't inject noise before
+    # their embeddings have meaningful gradients. 0 = never delay.
+    apollonian_channel_warmup_steps: int = 500
 
 
 # -----------------------------------------------------------------------------

@@ -24,6 +24,7 @@ is a follow-up once Phase 4 memory population is active.
 """
 
 from __future__ import annotations
+import math
 from typing import List, Optional
 
 import torch
@@ -100,6 +101,30 @@ class MoRShared(nn.Module):
         self.spectral_enabled = getattr(cfg, "mor_spectral_constraint", False)
         self.loop_idx_enabled = getattr(cfg, "mor_loop_index_enabled", False)
         self.lti_apollonian   = getattr(cfg, "mor_lti_apollonian_channel", True)
+        # AdS radial-depth cap (Aharony-Gubser-Maldacena CDS 387573). When True,
+        # the per-forward recursion budget is clamped to min(max_depth,
+        # floor(log2(T))+1). At typical T>=4 this is a no-op; at short T it
+        # saves compute without hurting the long-sequence training regime.
+        self.adaptive_depth   = getattr(cfg, "mor_adaptive_depth", False)
+        # RDT K extrapolation (ISRM, arxiv:2507.10524 §5.3): train at K<=max_depth,
+        # optionally push to a larger K at inference time. Set this attribute on
+        # the live model instance (model.mor.inference_k_override = 8) or via
+        # cfg.mor_inference_k_override at construction. Ignored in training mode.
+        self.inference_k_override: Optional[int] = getattr(cfg, "mor_inference_k_override", None)
+        # ISRM contractive refinement (arxiv:2507.10524): replace the hard
+        # assignment current <- next_state with a decaying residual update
+        #     current <- current + alpha_k * (next_state - current)
+        # alpha_k = (0.15 / (1 + 0.15*k)) * 0.97^k  — strictly contractive, so
+        # the recurrence is a Banach fixed-point iteration. Makes MoR tolerant
+        # to larger K at inference (the RDT extrapolation story).
+        self.isrm_contractive = getattr(cfg, "mor_isrm_contractive", False)
+        # Apollonian C-channel warmup. During the first N steps the memory
+        # packs are being populated but the stored embeddings haven't seen
+        # meaningful gradient yet, so injecting them via C*retrieved adds pure
+        # noise to MoR. Training-loop updates self.current_step; the C
+        # injection is gated off until current_step >= this warmup threshold.
+        self.apollonian_channel_warmup = getattr(cfg, "apollonian_channel_warmup_steps", 0)
+        self.current_step = 0  # caller sets via FANT3Model.set_global_step()
 
         if self.lti_enabled:
             # Diagonal A matrix — parameterized as a_diag (free tensor); the
@@ -153,7 +178,10 @@ class MoRShared(nn.Module):
         """Compute A*current + B*x_original [+ C*retrieved].  Shapes all (B,T,D)."""
         A = self._effective_A()                      # (D,)
         inj = A * current + self.b_proj(x_original)  # (B, T, D)
-        if self.c_proj is not None and retrieved is not None:
+        use_c = (self.c_proj is not None
+                 and retrieved is not None
+                 and self.current_step >= self.apollonian_channel_warmup)
+        if use_c:
             inj = inj + self.c_proj(retrieved)
         return inj
 
@@ -191,6 +219,16 @@ class MoRShared(nn.Module):
 
         depth = (depth_idx + 1).reshape(B, T)  # (B, T), values in {1..max_depth}
 
+        # Effective K cap: training uses max_depth; inference may override it
+        # (RDT K-extrapolation) and may also be clamped to the AdS radial cap.
+        if (not self.training) and (self.inference_k_override is not None):
+            k_cap = max(1, int(self.inference_k_override))
+        else:
+            k_cap = self.max_depth
+        if self.adaptive_depth:
+            k_cap = min(k_cap, max(1, int(math.log2(max(T, 1))) + 1))
+        depth = depth.clamp(max=k_cap)
+
         # x_original is captured here for the LTI B*x_orig injection channel —
         # prevents hidden-state drift over deep recursions (Mythos trick).
         x_original = x
@@ -204,7 +242,7 @@ class MoRShared(nn.Module):
         else:
             _ckpt = None
 
-        for pass_idx in range(1, self.max_depth + 1):
+        for pass_idx in range(1, k_cap + 1):
             # Loop-index positional signal — gives each pass a distinct identity
             # so the same shared block can behave differently at pass 0 vs pass k.
             if self.loop_idx_enabled:
@@ -233,6 +271,11 @@ class MoRShared(nn.Module):
             # Active mask: tokens whose chosen depth >= current pass continue
             # to use the NEW state; others stay frozen at their depth.
             active = (depth >= pass_idx).unsqueeze(-1)  # (B, T, 1)
-            current = torch.where(active, next_state, current)
+            if self.isrm_contractive:
+                alpha_k = (0.15 / (1.0 + 0.15 * pass_idx)) * (0.97 ** pass_idx)
+                updated = current + alpha_k * (next_state - current)
+            else:
+                updated = next_state
+            current = torch.where(active, updated, current)
 
         return current, r

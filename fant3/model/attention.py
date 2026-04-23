@@ -177,6 +177,22 @@ class MASAAttention(nn.Module):
         return torch.cat([x_rot, x_pass], dim=-1)
 
     # -------------------------------------------------------------------------
+    #  Area-law sliding-window mask (Ryu-Takayanagi / entanglement-wedge)
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _area_law_mask(T: int, device, dtype) -> torch.Tensor:
+        window = int(math.sqrt(T)) + 1
+        i = torch.arange(T, device=device).unsqueeze(1)
+        j = torch.arange(T, device=device).unsqueeze(0)
+        causal    = j <= i
+        in_window = (i - j) <= window
+        keep = causal & in_window
+        mask = torch.full((T, T), float("-inf"), device=device, dtype=dtype)
+        mask.masked_fill_(keep, 0.0)
+        return mask
+
+    # -------------------------------------------------------------------------
     #  Forward
     # -------------------------------------------------------------------------
 
@@ -220,10 +236,14 @@ class MASAAttention(nn.Module):
             k = k.repeat_interleave(self.kv_groups, dim=1)  # (B, H, T, Hd)
             v = v.repeat_interleave(self.kv_groups, dim=1)
 
-        # Scaled dot-product attention (use PyTorch's fused kernel if available)
-        # is_causal flag handled by caller's mask, but we can leverage SDPA's
-        # internal causal option if no mask is passed.
-        if mask is None:
+        # Scaled dot-product attention. Default: full causal. Opt-in
+        # `masa_area_law_window` replaces causal with a sliding-window causal
+        # mask of size floor(sqrt(T))+1, implementing the RT-surface area-law
+        # prescription (Faulkner-Lewkowycz-Maldacena, CERN CDS 2199026).
+        if mask is None and getattr(self.cfg, "masa_area_law_window", False) and T > 4:
+            mask = self._area_law_mask(T, x.device, x.dtype)
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        elif mask is None:
             out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         else:
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
