@@ -22,6 +22,16 @@ At the 50m preset FANT 3 fits in Colab's free tier. At the 1b preset it fits on 
 
 ---
 
+## Why "Fractal"?
+
+Three of FANT 3's core architectural decisions have genuine fractal structure:
+
+1. **Matryoshka MoE** is a scale-nested self-similar hierarchy — each inference level is a strict refinement of the previous one. This is the matryoshka-doll nesting that defines self-similarity in fractals.
+2. **Mixture of Recursions** is an iterated function system (IFS) with contractive maps. Its attractor is a fractal set whose Hausdorff dimension can be computed from the contraction ratios. Same mathematics as Barnsley's fern.
+3. **Spinor Apollonian memory** uses the Apollonian circle packing, which has Hausdorff dimension ≈ 1.3057. The α/β chirality split is a topological classification by which side of the packing each token lives on.
+
+The other components (MASA attention, AHN, ETF routing, Cerebellum, progressive curriculum) are not themselves fractal. "Fractal" in FANT names the three decisions that shape the model, not every module. See [mathematical-foundations.md § 9](./docs/mathematical-foundations.md) for the full derivation.
+
 ## What makes this special
 
 - **[Matryoshka Mixture of Experts](./docs/THEORY/README.md#matryoshka-moe)** — nested megapools of experts; coarse-to-fine activation lets a single trained model serve at multiple inference budgets.

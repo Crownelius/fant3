@@ -421,7 +421,91 @@ This is slightly better than gzip (~2.5 bpb) on specialized text, roughly 3x wor
 
 ---
 
-## 9. References
+## 9. The Fractal Thread
+
+The "F" in FANT stands for Fractal. Not every component of FANT 3 is fractal — MASA attention, AHN, ETF routing, Cerebellum, and the progressive curriculum are not. But three of the core architectural decisions are genuinely fractal in a precise mathematical sense, and it is those three that define the shape of the model.
+
+### 9.1 Matryoshka MoE as a scale-nested self-similar hierarchy
+
+Recall from section 1.1 the strict nesting chain
+
+$$
+\mathcal{E}_1 \subsetneq \mathcal{E}_2 \subsetneq \cdots \subsetneq \mathcal{E}_{L_{\text{mat}}}.
+$$
+
+Each $\mathcal{E}_\ell$ is a functional sub-model that produces a complete output distribution $p_\ell(y \mid x)$. The nesting invariant requires that the sub-model at level $\ell$ be **consistent** with the sub-model at level $\ell + 1$: any behavior producible at level $\ell$ is also producible at level $\ell+1$ (but not conversely).
+
+This is the defining property of a **scale-nested self-similar system**. In fractal geometry terms: the levels form a self-similar sequence under the "add more experts" scaling. If we write $S_\ell$ for the set of output distributions reachable at level $\ell$, then
+
+$$
+S_1 \subsetneq S_2 \subsetneq \cdots \subsetneq S_{L_{\text{mat}}},
+$$
+
+and each $S_\ell$ is a refinement of $S_{\ell-1}$ on the same probability simplex. The matryoshka doll metaphor (from which the architecture takes its name) is precise: each level contains the previous level, scaled up.
+
+### 9.2 Mixture of Recursions as an iterated function system
+
+From section 2.1, the MoR update is
+
+$$
+x^{(k+1)} = (1 - \alpha_k) x^{(k)} + \alpha_k f_\theta(x^{(k)}).
+$$
+
+This is an **iterated function system** (IFS) in the sense of Hutchinson 1981. An IFS is a finite set of contractive maps $\{T_1, \ldots, T_n\}$ on a complete metric space; its **attractor** $A$ is the unique compact set satisfying
+
+$$
+A = T_1(A) \cup T_2(A) \cup \cdots \cup T_n(A).
+$$
+
+Under contractive decay (section 2.2), the MoR update is a single contraction $T_\alpha$ with contraction ratio $\alpha$. The attractor is a fixed point. Under **dynamic-$K$** (section 2.3), the effective system is stochastic — each step samples which $T_{\alpha_k}$ to apply from a finite family indexed by $k$. The stochastic attractor is a measurable fractal set whose Hausdorff dimension can be computed from the contraction ratios via the Moran equation
+
+$$
+\sum_{k} \alpha_k^{s} = 1,
+$$
+
+where $s$ is the Hausdorff dimension. For uniform $\alpha_k = \alpha$ and $n$ recursion depths, $s = \log(n) / \log(1/\alpha)$. For FANT 3 typical values $n = 3$, $\alpha_k \in [0.3, 0.7]$: $s \approx 1.5$ to $3.0$.
+
+**The attractor set is where token representations converge under recursion.** Shallow tokens land near the surface of the attractor; deep tokens penetrate its interior. Barnsley's fern is the same class of object.
+
+### 9.3 Spinor Apollonian memory as the Apollonian fractal
+
+The Apollonian packing is the canonical example of a circle-packing fractal. Starting with four mutually tangent circles satisfying the Descartes equation $Q = 0$ (section 4.1), each triple of tangent circles bounds a curvilinear triangle; the Descartes operator $D$ constructs a new circle tangent to all three, filling the triangle. Applied recursively, this generates an infinite packing whose **Hausdorff dimension** is
+
+$$
+\dim_H(\text{Apollonian packing}) \approx 1.30568673...
+$$
+
+(Mandelbrot 1983, refined by Boyd 1973 and McMullen 1998). This is a measurable fractal dimension — neither 1 (a curve) nor 2 (a region), but strictly between.
+
+When FANT 3 projects hidden states $x_t$ to 4-vectors $\mathbf{v}_t \in \mathbb{R}^4$ and computes the Descartes invariant $Q_t$, the chirality $\chi_t = \mathrm{sign}(Q_t)$ partitions tokens by which **side of the packing** they live on. Tokens with $\chi_t = +1$ (α-pack) correspond to points inside the filled regions of the packing; tokens with $\chi_t = -1$ (β-pack) correspond to points outside. The packing boundary itself is the fractal set where $Q_t = 0$.
+
+In this sense, the memory structure is **literally a packing of fractal sets**, not an analogy to one.
+
+### 9.4 What isn't fractal
+
+For honesty: the other five components are not fractal.
+
+- **MASA attention** is a rank-$r$ decomposition with a shared dictionary. This is low-rank structure, not fractal structure.
+- **AHN** is a FIFO plus a compressed buffer. Linear structure.
+- **ETF routing** is an optimal simplex arrangement — a tight frame, not a fractal.
+- **Cerebellum** is an echo-state reservoir. The biological cerebellum has fractal cortical folding with dimension ~2.57 (Mandelbrot 1983), but the mathematical reservoir itself is a standard RNN attractor, not a fractal.
+- **Progressive curriculum** is a three-phase weighted schedule. No fractal structure.
+
+The "F" in FANT names the three fractal decisions (Matryoshka, MoR, Apollonian) that shape the overall architecture. It does not claim every module is fractal.
+
+### 9.5 Why this matters
+
+Fractal structure is not decorative. It gives three concrete properties that flat architectures lack:
+
+1. **Elastic inference.** Matryoshka nesting means one trained checkpoint serves multiple compute budgets by terminating at any level.
+2. **Depth extrapolation.** MoR's contractive IFS converges to an attractor regardless of iteration count, so models trained at $K = 3$ can run at $K = 6$ without divergence. Validated empirically at the 1 M scale (section 2.4).
+3. **Topological memory split.** The α/β chirality is a topological invariant — it cannot starve under threshold drift, because there is no threshold. Validated across five scales (section 4.3).
+
+None of these properties are obtainable from flat, non-fractal designs.
+
+---
+
+## 10. References
 
 | Paper | Used in | arXiv |
 |---|---|---|
