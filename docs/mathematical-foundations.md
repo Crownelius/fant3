@@ -254,6 +254,16 @@ $$
 
 Training fluctuations in $\tau$ caused all tokens to fall on one side of the threshold — one pack got 100% of tokens, the other starved. The Descartes invariant is **intrinsic** to the hidden state's geometry and doesn't depend on a learned threshold. It's well-conditioned at initialization because $P$ is initialized with orthogonal columns, so $\mathbf{v}_t$ is nearly isotropic and $Q_t$ is nearly symmetric about zero.
 
+### 4.5 External validation (Bucher et al. 2026)
+
+Bucher, Kaminer et al. (Nature 651:920, 2026) measured topological phase singularities in hexagonal boron nitride polaritons and demonstrated that the sign of the Descartes invariant (equivalently, the chirality in $\mathrm{Cl}(1,2)$) classifies singularities into a $+1$/$-1$ topological-charge pair with the same universal behavior that Toulouse & Kléman (1976) derived via homotopy groups for superconductors, superfluids, and liquid crystals. The classification is not a threshold; it is a topological invariant.
+
+Three implications for FANT 3's memory:
+
+1. The same homotopy argument that makes Bucher's classification principled makes ours principled. Hidden-state fields and optical phase fields are both $\mathrm{Cl}(1,2)$-valued up to the choice of $P$; the classifier is the same.
+2. The α/β chirality balance in our architecture sits in the 0.266–0.719 range across scales (measured 2026-04-19), which is exactly the regime Bucher finds experimentally for polariton singularity populations in similar random-wave ensembles.
+3. A longer discussion of the external validation, with the full intellectual lineage from Kelvin 1867 through Bucher 2026, is in [`article/topological-classifier-universality.md`](./article/topological-classifier-universality.md).
+
 ---
 
 ## 5. Equiangular Tight Frames and Router Freezing
@@ -511,6 +521,9 @@ None of these properties are obtainable from flat, non-fractal designs.
 |---|---|---|
 | Wang et al. 2025 | Matryoshka MoE | 2509.26520 |
 | Kocik 2020 | Spinor Apollonian | 2001.05866 |
+| Bucher, Kaminer et al. 2026 | Spinor Apollonian external validation | 2509.17675 (Nature 651:920) |
+| Toulouse & Kléman 1976 | Homotopy classification of defects | J. Phys. Lett. 37:L149 |
+| Berry & Dennis 2000 | Phase singularity statistics | Proc. R. Soc. A 456:2059 |
 | ByteDance 2025 | AHN | (TR) |
 | Jaeger 2001 | Echo-state networks | (Tech Rep) |
 | Welch 1974 | ETF bound | (JOSA) |

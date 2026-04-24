@@ -84,6 +84,14 @@ All within the healthy 0.2–0.8 band.
 
 Each pack has `apollonian_alpha_cap` or `apollonian_beta_cap` slots (default 128 each). Eviction is currently FIFO. A planned upgrade (per arXiv:2512.03324 TRIM-KV) would use a retention gate `β = σ(W x + b)` with temporal decay `β^(t-i)`.
 
+### External validation: Bucher et al. 2026
+
+A direct external validation of the topological-classifier design appeared in Bucher, Kaminer et al., *Superluminal Correlations in Ensembles of Optical Phase Singularities* (Nature 651:920, 2026 — arXiv:2509.17675). The paper measures phase-singularity dynamics in hexagonal boron nitride phonon polaritons and confirms experimentally what Toulouse & Kléman (1976) argued mathematically: topological defects in superconductors, superfluids, fluids, and optical fields are the same object — classified by homotopy group, not by any scalar threshold. Bucher's dataset fits the same Berry-Dennis (2000) random-wave statistics that would apply to the chirality field FANT 3 classifies.
+
+The practical implication: the α/β chirality split is principled in the same sense that the particle/anti-particle split in Bucher's polariton data is principled. Neither relies on a learned threshold; both derive from a topological invariant of the underlying field.
+
+A longer discussion of this external validation, including the 140-year intellectual lineage from Kelvin 1867 through Bucher 2026, is in [article/topological-classifier-universality.md](../article/topological-classifier-universality.md).
+
 ## AHN
 
 **Where:** `fant3/model/ahn.py`

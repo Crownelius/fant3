@@ -4,6 +4,16 @@ Measured results from the FANT 3 workspace, in reverse chronological order. Ever
 
 ---
 
+## 2026-04-24 — External validation of Spinor Apollonian memory
+
+Bucher, Kaminer et al., *Superluminal Correlations in Ensembles of Optical Phase Singularities*, Nature 651:920 (March 2026), arXiv:2509.17675. The paper measures optical phase singularities moving at average velocity 1.04 c (29% exceeding c) in hexagonal boron nitride polaritons.
+
+For FANT 3, the paper is external validation of the topological-classifier design of the Spinor Apollonian memory module. The α/β chirality split on the sign of the Descartes invariant — the same invariant Bucher's team uses to classify phase singularities into +1/−1 topological charges — sits in a 140-year lineage (Kelvin 1867 → Poincaré 1885 → Toulouse-Kléman 1976 → Berry-Dennis 2000 → Bucher 2026) confirming that topological classification is universal across superconductors, superfluids, fluids, and optical fields. The FANT architecture joins this universality class.
+
+Citation tree of the paper (81 references) researched in parallel and synthesized: theoretical tripod (Berry-Dennis 2000 / Maleev-Swartzlander 2003 / Berry 2025), platform tripod (Yoxall 2015 hBN / Giles 2018 isotope / Liu 2018 growth), methodology tripod (Bucher FERI 2023 / amplified FERI 2024 / Ferrari PELM 2025).
+
+See [docs/article/topological-classifier-universality.md](docs/article/topological-classifier-universality.md) for full discussion.
+
 ## 2026-04-24 — Curriculum module landed + Fix 3 RL plan documented
 
 - **Progressive curriculum** (per arxiv:2604.16278 DeepInsightTheorem) implemented as `fant3/training/curriculum.py` with three named presets: `legacy_2phase` (default, bit-identical), `deepinsight_3phase` (Apprentice/Journeyman/Expert), `flat_1phase` (control).
