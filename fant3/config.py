@@ -191,6 +191,38 @@ def fant3_smoke() -> FANT3Config:
     )
 
 
+def fant3_1m() -> FANT3Config:
+    """~1M toy preset for local ISRM smoke (2026-04-24).
+
+    Purpose: prove dynamic-K + monotonic-CE + contractive-alpha work end-to-end
+    in a real training loop on CPU in minutes, not hours.
+
+    Tight vocab (2048) so the tied emb doesn't dominate; dim=128 / 4 layers /
+    2 experts / moe_hidden=192 brings stored params to ~0.99M. Cerebellum +
+    AHN + ETF-freeze all disabled — we're measuring MoR/ISRM behaviour, not
+    the full stack.
+
+    Verified: 0.99M stored. Runs ~1 step/sec on a laptop CPU at B=4 T=64.
+    """
+    return FANT3Config(
+        vocab_size=2048,
+        dim=128, n_layers=4, n_dense_layers=1,
+        n_heads=4, n_kv_heads=1, head_dim=32,
+        n_megapools=1, n_per_megapool=2, top_k=1,    # 2 experts
+        n_matryoshka_levels=1,
+        shared_expert_hidden=96, moe_hidden=192,
+        n_attention_atoms=2, masa_coef_rank=2,
+        n_recursion_depths=3,                         # 3 so dynamic K has a real range
+        kron_A_p=4, kron_A_q=4, kron_B_p=8, kron_B_q=8, kron_C_p=8, kron_C_q=8,
+        max_seq_len=64,
+        cerebellum_enabled=False,
+        ahn_enabled=False,
+        apollonian_alpha_cap=128, apollonian_beta_cap=128,
+        apollonian_retrieval_layers=(2, 3),
+        etf_freeze_enabled=False,
+    )
+
+
 def fant3_10m() -> FANT3Config:
     """~10M preset for budget Chinchilla-optimal runs (2026-04-23).
 

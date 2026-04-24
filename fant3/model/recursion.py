@@ -219,10 +219,21 @@ class MoRShared(nn.Module):
 
         depth = (depth_idx + 1).reshape(B, T)  # (B, T), values in {1..max_depth}
 
-        # Effective K cap: training uses max_depth; inference may override it
-        # (RDT K-extrapolation) and may also be clamped to the AdS radial cap.
-        if (not self.training) and (self.inference_k_override is not None):
+        # Effective K cap: default is max_depth; an override works in either
+        # training or eval. In eval this is ISRM-style K-extrapolation
+        # (arxiv:2507.10524 §5.3). In train this enables ISRM dynamic-K
+        # sampling — callers set `mor.inference_k_override = K` each batch
+        # so the model sees varied K during training, which is what makes
+        # K-extrapolation work at inference. AdS radial cap still applies.
+        if self.inference_k_override is not None:
             k_cap = max(1, int(self.inference_k_override))
+            # ISRM-style K extrapolation: when override exceeds the trained
+            # max_depth the router can't assign depths > max_depth (its head
+            # has only max_depth logits), so extra passes would be silent
+            # no-ops via the (depth >= pass_idx) mask. Promote all tokens to
+            # k_cap when extrapolating so the extra compute is actually used.
+            if k_cap > self.max_depth:
+                depth = torch.full_like(depth, k_cap)
         else:
             k_cap = self.max_depth
         if self.adaptive_depth:
@@ -247,7 +258,10 @@ class MoRShared(nn.Module):
             # so the same shared block can behave differently at pass 0 vs pass k.
             if self.loop_idx_enabled:
                 # Expand (dim,) -> (1, 1, dim) for broadcast over (B, T, dim)
-                k_emb = self.loop_emb[pass_idx - 1].view(1, 1, D)
+                # Clamp the index for K-extrapolation: when k_cap > max_depth,
+                # reuse the last-trained loop embedding for excess passes.
+                emb_idx = min(pass_idx - 1, self.max_depth - 1)
+                k_emb = self.loop_emb[emb_idx].view(1, 1, D)
                 block_input = current + k_emb
             else:
                 block_input = current
