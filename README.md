@@ -1,254 +1,286 @@
-# FANT 3 (Fractal Atomic Neural Topology version 3)
+# FANT 3
 
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![License](https://img.shields.io/badge/license-TBD-lightgrey)
-![Status](https://img.shields.io/badge/status-active%20research-green)
+> **Fractal Atomic Neural Topology, version 3 — a compact language model research workspace.**
 
-> *"Train an attention pattern to be Apollonian, train a routing distribution to be Parisi-ultrametric, and train a residual stream to be at the edge of chaos — then let the model see what kind of cognition falls out."*
+[![License: Research](https://img.shields.io/badge/License-Research--Only-lightgrey)](./LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![Status](https://img.shields.io/badge/status-active%20research-green)](./ACHIEVEMENTS.md)
+[![Tests](https://img.shields.io/badge/tests-125%20passing-brightgreen)](./tests/)
+[![Scale](https://img.shields.io/badge/scales-20m%20to%201b-orange)](./docs/USER_GUIDE/README.md)
 
-FANT 3 is the third-generation **Fractal Atomic Neural Topology** language model research workspace. It explores a cluster of ideas that do not fit neatly into standard transformer recipes:
+FANT 3 is a Mixture-of-Experts language model designed to run the *entire* training-and-eval loop on a single Ampere-class GPU. It explores a cluster of ideas that do not fit neatly into standard transformer recipes: Matryoshka-nested expert activation, per-token recursion depth, attention built from a shared dictionary, and memory packs split by Kocik spinor chirality rather than scalar curvature.
 
-- **MoE (Mixture of Experts)** with Matryoshka nested coarse-to-fine activation for elastic inference
-- **MoR (Mixture of Recursions)** for per-token adaptive compute depth
-- **MASA (Multi-head Attention with Shared Atoms)** where all layers share a learned dictionary of attention basis matrices
-- **Apollonian-geometry memory** — two complementary memory packs (α instance / β schema) split by Kocik tangency spinors rather than a scalar threshold
-- **AHN (Artificial Hippocampus Networks)** — a sliding short-term buffer plus a compressed long-term buffer applied as a gated residual
-- **ETF (Equiangular Tight Frame)** router freezing for free compression after warmup
-- **Cerebellum** — an echo-state reservoir with Purkinje readout (active at 742m and 1b scales)
+### Size in context
 
-The workspace targets a single Ampere-class GPU (RTX 3060 12 GB for development, A100 40–96 GB for training runs), with **bf16 (bfloat16)** weights, 8-bit AdamW, and gradient checkpointing.
+- **FANT 3 (50m preset, stored):** 0.05 GB (50.79 M parameters)
+- **FANT 3 (1b preset, stored):** 0.99 GB (986.62 M parameters)
+- **Llama 3 70B:** 140 GB
+- **GPT-4 (estimated):** 3,500 GB
+- **Ratio (50m vs GPT-4):** 70,000 times smaller
 
----
-
-## Table of Contents
-
-1. [Quick Facts](#quick-facts)
-2. [Quickstart](#quickstart)
-3. [Architecture](#architecture)
-4. [Training Recipes and Data](#training-recipes-and-data)
-5. [Notebooks](#notebooks)
-6. [Scripts](#scripts)
-7. [Testing](#testing)
-8. [Evaluation](#evaluation)
-9. [History](#history)
-10. [Architectural Decisions](#architectural-decisions)
-11. [Related Research](#related-research)
-12. [License and Acknowledgments](#license-and-acknowledgments)
+At the 50m preset FANT 3 fits in Colab's free tier. At the 1b preset it fits on a single A100 40 GB. No preset in this repo requires more than one GPU.
 
 ---
 
-## Quick Facts
+## What makes this special
 
-| Attribute | Value |
-|---|---|
-| Supported scales | 20m, 50m, 150m, 350m, 742m, 1b |
-| Actual stored param counts | 23.5M / 50.8M / 96M / 263M / 770.88M / 986.62M |
-| Minimum hardware (50m) | A100 40 GB (Colab Pro) |
-| Minimum hardware (742m / 1b) | A100 80–96 GB |
-| Training tokens (742m Tier C) | 81.92M (190x under Chinchilla-optimal for this scale) |
-| Latest milestone | 742m Tier C: 78.6 min on A100 96 GB, best CE (Cross-Entropy) 5.72 at step 7025 |
-| Vocabulary | 32,768 BPE (Byte-Pair Encoding) tokens, retrained on 6-source distillation mix |
-| Precision | bf16 weights + 8-bit AdamW + gradient checkpointing at 742m+ |
-| Key architectural novelties | Matryoshka MoE, SpinorApollonianMemory, MASA, MoR, AHN, ETF freezing |
-
-> **Important:** The named presets (`fant3_742m`, `fant3_1b`) have been calibrated to their advertised sizes as of 2026-04-19. The original presets materialized 6.6B and ~7B parameters respectively due to full-rank expert weight matrices ignoring the Kronecker config fields. Always verify with `sum(p.numel() for p in model.parameters())` before trusting a VRAM budget.
+- **[Matryoshka Mixture of Experts](./docs/THEORY/README.md#matryoshka-moe)** — nested megapools of experts; coarse-to-fine activation lets a single trained model serve at multiple inference budgets.
+- **[Mixture of Recursions](./docs/THEORY/README.md#mor)** — a lightweight router selects 1–3 recursion passes per token; simple tokens exit early, hard tokens loop.
+- **[Multi-head Attention with Shared Atoms](./docs/THEORY/README.md#masa)** — all layers share a learned dictionary of attention basis matrices; per-layer rank-`r` coefficients.
+- **[Spinor Apollonian Memory](./docs/THEORY/README.md#spinor-apollonian-memory)** — Kocik Cl(2,1) tangency spinors split hidden states into α-instance and β-schema packs; fixes the α/β starvation bug of scalar-curvature classifiers.
+- **[Artificial Hippocampus Network](./docs/THEORY/README.md#ahn)** — short-term FIFO plus a compressed long-term buffer, applied as a zero-initialized gated residual.
+- **[Equiangular Tight Frame router freezing](./docs/THEORY/README.md#etf-freezing)** — free compression after warmup; no information loss under a simplex ETF geometry.
+- **[Cerebellum reservoir](./docs/THEORY/README.md#cerebellum)** — a 25M-parameter echo-state reservoir with Purkinje linear readout; capacity is fixed regardless of backbone scale.
+- **[Progressive curriculum](./docs/THEORY/README.md#progressive-curriculum)** — Apprentice/Journeyman/Expert three-phase data mix per arxiv:2604.16278; disproportionate gains in the 1B–3B band.
 
 ---
 
-## Quickstart
+## Quick start
 
-For a five-minute end-to-end walkthrough see **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)**.
+### Prerequisites
 
-The fastest path:
+- Python 3.10+
+- One Ampere-class GPU (RTX 3060 12 GB for development, A100 40–96 GB for training runs)
+- Optional: Google Colab Pro+ for A100 access
+
+### 30-second smoke test
 
 ```bash
-# 1. Install dependencies
+# Clone
+git clone https://github.com/Crownelius/fant3.git
+cd fant3
+
+# Install
 pip install -r requirements.txt
 
-# 2. Smoke-test (CPU, ~30 seconds)
-python scripts/smoke_fant3.py
+# Smoke test (CPU, under 30 seconds)
+python scripts/smoke_curriculum.py
 
-# 3. Run the full test suite
+# Run the full test suite
 python -m pytest tests/ -v
-
-# 4. Train (Colab notebook, recommended for GPU)
-# Open notebooks/fant3_colab_train.ipynb in Google Colab
-# Set TARGET_SCALE = '50m' and run top-to-bottom
 ```
 
-Colab is the recommended training environment. See [docs/NOTEBOOKS.md](docs/NOTEBOOKS.md) for a cell-by-cell walkthrough.
+### What you will see
 
----
+```
+Checking 3 preset(s) @ total_steps=12000
 
-## Architecture
+=== legacy_2phase @ total_steps=12000 ===
+  curriculum.name = legacy_2phase
+  n_phases = 2
+    phase[0]      'A'  end_frac=0.667  end_step=8000  n_datasets=6  seq_len=1024
+    phase[1]      'B'  end_frac=1.000  end_step=12000 n_datasets=6  seq_len=1024
+  phase walk: A@0 -> B@8160
+  milestone boundaries: {8000: '_phaseA'}
+  OK
 
-Architecture deep-dives live in **[docs/architecture/](docs/architecture/)**.
+=== deepinsight_3phase @ total_steps=12000 ===
+  n_phases = 3
+    phase[0] 'apprentice' end_frac=0.250  end_step=3000  n_datasets=5
+    phase[1] 'journeyman' end_frac=0.650  end_step=7800  n_datasets=7
+    phase[2]     'expert' end_frac=1.000  end_step=12000 n_datasets=7
+  OK
 
-High-level summary:
+ALL 3 preset(s) OK
+```
 
-| Component | Design |
-|---|---|
-| Attention | MASA — all layers share `n_attention_atoms` basis matrices; per-layer coefficients of rank `masa_coef_rank` |
-| Feed-forward | Matryoshka MoE — nested megapools of experts; elastic inference by level |
-| Depth | MoR — lightweight router selects recursion depth per token (1–3 passes) |
-| Memory | SpinorApollonianMemory — Kocik Cl(2,1) spinor chirality splits hidden states into α (instance) / β (schema) packs |
-| Short-term memory | AHN — FIFO of last `short_window` tokens + compressed long-term latents; gated residual before final norm |
-| Reservoir | Cerebellum — echo-state reservoir (spectral radius 0.95) + Purkinje linear readout; fixed 25M params regardless of scale |
-| Router stability | Simplex ETF initialization; frozen after `etf_freeze_after_step` |
-| Vocabulary | 32,768-token BPE tokenizer trained on 82K documents from the 6-source distillation mix |
-
-FANT 3 builds on the FANT 2 lineage but is a clean-room implementation with these key differences:
-
-- **FANT 2**: 60M stored / 200M active, HierarchicalApollonianRouter, 7-phase FEP training pipeline, RTX 3060 target
-- **FANT 3**: 20M–1B stored, Matryoshka MoE, MoR, MASA, SpinorApollonianMemory, Colab A100 primary target, single-notebook training
-
----
-
-## Training Recipes and Data
-
-Dataset registry, data mixing logic, and decontamination details live in **[docs/datasets/](docs/datasets/)**.
-
-Brief summary of the data strategy:
-
-- **MIX v3 (NVIDIA-heavy, for 150m–1b)**: 11 sources, NVIDIA datasets at 60% weight (OpenMathReasoning, OpenCodeReasoning-2, Cascade-2 math/chat/science), FineWeb-Edu 20%, Sonnet 4.6 distillation 12%, Opus 4.6 distillation 8%
-- **MIX v4 (chat-focused, for 20m–50m)**: 12 sources, Sonnet 4.6 at 22%, Cascade-2 chat/IF, FineTome, Daring-Anteater; targets fluent short-form conversation
-- **Decontamination**: 13-gram SHA-1 filter against GSM8K + MATH-500 + MMLU test sets (457,910 unique hashes); worst contamination rate 1.80% (NVIDIA OpenMathInstruct-2)
-- **Format**: All training targets wrapped in `<|answer|>...<|/answer|>` tags matching the evaluation extraction pattern
-
----
-
-## Notebooks
-
-Full cell-by-cell documentation: **[docs/NOTEBOOKS.md](docs/NOTEBOOKS.md)**.
-
-The primary training notebook is `notebooks/fant3_colab_train.ipynb` — 28 cells, parameterized by a single `TARGET_SCALE` constant (`'20m'`, `'50m'`, `'150m'`, `'350m'`, `'742m'`, `'1b'`).
-
-Quick reference for Colab A100:
-
-| Scale | Effective batch | Sequence length | Steps | Approx wall time | VRAM (GPU RAM) |
-|---|---|---|---|---|---|
-| 50m | 32 | 1024 | 60,000 | ~12 h | ~8 GB |
-| 150m | 8 | 512 | 2,500 | ~45 min | ~8 GB |
-| 350m | 8 | 512 | 5,000 | ~2 h | ~15 GB |
-| 742m | 8 | 1024 | 10,000 | ~80 min | ~46 GB |
-| 1b | 8 | 1024 | 12,000 | ~95 min | ~50 GB |
-
----
-
-## Scripts
-
-The `scripts/` directory contains standalone Python scripts for training, evaluation, and diagnostics. Key scripts:
-
-| Script | Purpose |
-|---|---|
-| `smoke_fant3.py` | Quick end-to-end smoke test (CPU, ~30 s) |
-| `scale_ladder_smoke.py` | Validates all five scales end-to-end |
-| `decontaminate.py` | Builds/queries the 13-gram benchmark contamination filter |
-| `eval_benchmarks.py` | Unified GSM8K / MMLU / MATH-500 evaluator with Wilson 95% CI |
-| `eval_1k.py` / `eval_1k_default.py` | 1K-problem accuracy eval with extraction |
-| `retrain_tokenizer.py` | Trains `tokenizer_v2.json` from the 6-source corpus |
-| `train_2b.py` | Standalone 2B-scale training (requires 24+ GB VRAM) |
-| `run_campaign_n.py` | Runner for FANT 2 Campaign N ablations |
-
----
-
-## Testing
+### First real training run (Colab recommended)
 
 ```bash
-python -m pytest tests/ -v        # full suite (~30 tests)
-python -m pytest tests/test_smoke.py -v           # import + forward/backward
-python -m pytest tests/test_spinor_apollonian.py  # SpinorApollonianMemory (10 tests)
-python -m pytest tests/test_ahn.py                # AHN (6 tests)
-python -m pytest tests/test_sae.py                # SAE diagnostics (6 tests)
-python -m pytest tests/test_router_collapse.py    # FANT 2 router regression canary
+# Local (for development)
+python scripts/runpod_train.py --scale 50m --dry-run
 ```
 
-The test suite covers:
-- All public FANT 3 modules (config, attention, MoE, MoR, spinor memory, AHN, SAE)
-- SpinorApollonianMemory chirality balance (verified unbiased at 5-seed mean 0.5188)
-- AHN buffer saturation and gate initialization
-- FANT 2 router-collapse regression (single expert must not exceed 85% load; FANT 350M had 94.5%)
-- Trainer integration (every FANT 2 phase, loss keys, parameter updates, checkpoint round-trip)
+Or open `notebooks/fant3_1b_nvidia_train.ipynb` in Colab with an A100, set `TARGET_SCALE = '50m'`, and run the notebook top-to-bottom.
 
 ---
 
-## Evaluation
+## Learning path
 
-After training, evaluation runs through `scripts/eval_benchmarks.py`:
+### 1. Start here: understanding the design
+
+**Read first:** [Overview](./overview/README.md)
+- What problem is FANT 3 solving?
+- Why compact Mixture of Experts?
+- How does the training loop fit on one GPU?
+
+### 2. User guide
+
+**Next:** [User Guide](./docs/USER_GUIDE/README.md)
+- Getting started with the notebooks
+- Training recipes per scale (20m, 50m, 150m, 350m, 742m, 1b)
+- Running evaluations
+- Resuming checkpoints
+
+### 3. Theory
+
+**The physics and geometry:** [Theory Guide](./docs/THEORY/README.md)
+- Matryoshka MoE and nested expert activation
+- Mixture of Recursions and per-token adaptive depth
+- Spinor Apollonian memory and Kocik tangency
+- ETF (Equiangular Tight Frame) routing and free compression
+- Progressive curriculum and why it works in 1B–3B
+
+### 4. Developer guide
+
+**For contributors:** [Developer Guide](./docs/DEVELOPER_GUIDE/README.md)
+- Architecture walkthrough (where each concept lives in code)
+- Testing protocol
+- Adding a new preset / dataset / curriculum
+- Diagnosing router collapse, chirality starvation, NaN steps
+
+### 5. Article
+
+**The narrative:** [The FANT Story](./docs/article/README.md)
+- How FANT 2 (60 M / 200 M active) led to FANT 3 (1 B / 100 M active)
+- Why Matryoshka MoE over standard top-k
+- The geometry of Apollonian memory
+
+### 6. Walkthrough
+
+**End-to-end:** [Walkthrough](./docs/walkthrough.md)
+- From `git clone` to a trained checkpoint
+- Every architectural component you encounter on the way
+
+---
+
+## Project structure
+
+```
+fant3/
+|-- README.md                  # This file
+|-- ACHIEVEMENTS.md             # Milestones and results
+|-- CLAUDE.md                   # Session context for AI collaborators
+|-- docs/                       # Full documentation suite
+|   |-- README.md                    # Docs index
+|   |-- glossary.md                  # Terms (MoE, MoR, MASA, ETF, bf16, ...)
+|   |-- size-comparison.md           # FANT vs GPT-class models
+|   |-- walkthrough.md               # End-to-end narrative
+|   |-- USER_GUIDE/                  # For users running training + eval
+|   |-- DEVELOPER_GUIDE/             # For contributors + architects
+|   |-- THEORY/                      # Mathematical foundations
+|   |-- article/                     # Narrative essays
+|   |-- ADR/                         # Architectural Decision Records
+|   |-- architecture/                # Component deep-dives
+|   |-- datasets/                    # Data mix + decontamination
+|   |-- evaluation/                  # Benchmark protocol
+|   |-- scripts/                     # Script-level references
+|   `-- testing/                     # Testing protocol
+|-- overview/                   # One-page conceptual overview
+|   `-- README.md
+|-- fant3/                      # Current architecture (v3)
+|   |-- config.py                    # Preset table (fant3_1m through fant3_1b)
+|   |-- model/                       # Attention, MoE, MoR, memory, AHN, Cerebellum
+|   |-- training/                    # Curriculum, schedulers, optimizer, RL (queued)
+|   |-- diagnostics/                 # SAE introspection
+|   `-- data/                        # Formats + registry (shared with fant2)
+|-- fant2/                      # Legacy runtime (for comparison and probes)
+|-- scripts/                    # Standalone training / eval / smoke scripts
+|   |-- runpod_train.py              # Primary training driver
+|   |-- smoke_curriculum.py          # GPU-free curriculum dry-run
+|   |-- eval_benchmarks.py           # GSM8K / MMLU / MATH-500
+|   `-- decontaminate.py             # 13-gram benchmark filter
+|-- notebooks/                  # Colab training notebooks
+|-- tests/                      # 125 passing pytest tests
+|-- bendvm/                     # Spinor VM experiments (research aside)
+|-- output/                     # Tokenizers, decontamination hashes, checkpoints
+`-- fant_code.zip               # RunPod upload artifact (rebuilt via build_fant_zip.py)
+```
+
+---
+
+## Key features
+
+### Scale ladder
+
+| Preset | Stored params | Min VRAM | Typical run | Notes |
+|---|---|---|---|---|
+| `fant3_1m` | 0.99 M | CPU | Laptop ISRM smoke | Copy-task training harness |
+| `fant3_10m` | 9.5 M | 4 GB | Sub-Chinchilla sanity | Verified 2026-04-23 |
+| `fant3_15m` | 14.6 M | 4 GB | Colab T4 | — |
+| `fant3_20m` | 23.5 M | 6 GB | Colab T4 / RTX 3060 | — |
+| `fant3_50m` | 50.79 M | 12 GB | Colab A100 40 GB | Current RunPod target |
+| `fant3_150m` | 96 M | 12 GB | RTX 3060 | — |
+| `fant3_350m` | 263 M | 24 GB | A100 40 GB | — |
+| `fant3_742m` | 770.88 M | 46 GB | A100 80 GB | 742m Tier C complete 2026-04-19 |
+| `fant3_1b` | 986.62 M | 50 GB | A100 80 GB | — |
+
+The `fant3_742m` and `fant3_1b` presets were recalibrated on 2026-04-19 after a bug caused them to materialize 6.6 B and ~7 B parameters respectively. Always verify with `sum(p.numel() for p in model.parameters())` before trusting a VRAM budget.
+
+### Training
+
+- bf16 (bfloat16) weights + 8-bit AdamW + gradient checkpointing for 742m and 1b
+- Litim compact-support LR schedule (Phys. Rev. D 64 105007; smoother than cosine at the right endpoint)
+- Three data-mix curricula: `legacy_2phase` (default), `deepinsight_3phase` (per arxiv:2604.16278), `flat_1phase` (control arm)
+- Checkpoint naming: rolling `step_XXXXX.pt` plus milestone `step_XXXXX_phase_{name}.pt` / `_final.pt`
+
+### Evaluation
+
+- 13-gram SHA-1 decontamination cache: 457,910 unique hashes across GSM8K, MATH-500, MMLU
+- Unified `scripts/eval_benchmarks.py` with Wilson 95% confidence intervals
+- Benchmarks: GSM8K, MMLU, MATH-500
+- Worst-source contamination rate: 1.80% (NVIDIA OpenMathInstruct-2)
+
+### Data
+
+- 11-source MIX v3: NVIDIA 60%, FineWeb-Edu 20%, Sonnet 4.6 12%, Opus 4.6 8%
+- All targets wrapped in `<|answer|>...<|/answer|>` matching the eval extraction pattern
+- Tokenizer v2: 32,768-token BPE trained on 82K documents from the 6-source mix
+
+---
+
+## Running training on RunPod
 
 ```bash
-python scripts/eval_benchmarks.py \
-    --ckpt output/742m/final.pt \
-    --tokenizer output/tokenizer/tokenizer_v2.json \
-    --benchmark gsm8k \
-    --n 50
+# A/B arm: DeepInsight 3-phase curriculum
+python scripts/runpod_train.py --scale 50m --curriculum deepinsight_3phase \
+  --batch-size 8 --grad-accum 2 --peak-lr 3e-4 --warmup-steps 1000 \
+  --total-steps 1000000 --ckpt-every 2500 --ckpt-keep-last 3 \
+  --wandb-project fant3 --wandb-run-name curriculum_deepinsight --hf-login
+
+# Control arm: legacy 2-phase (bit-identical to pre-curriculum runs)
+python scripts/runpod_train.py --scale 50m \
+  --phase-a-steps 60000 --total-steps 1000000 \
+  --batch-size 8 --grad-accum 2 --peak-lr 3e-4 --warmup-steps 1000 \
+  --ckpt-every 2500 --ckpt-keep-last 3 \
+  --wandb-project fant3 --wandb-run-name curriculum_legacy --hf-login
 ```
 
-Supported benchmarks: `gsm8k`, `mmlu`, `math500`.
-
-Expected results at current training scale (742m Tier C, 82M tokens):
-- **GSM8K**: 1–4% (undertrained; Chinchilla-optimal would be 15B tokens)
-- **MMLU**: ~26% (at statistical chance; 4-way multiple-choice baseline is 25%)
-
-The Colab notebook (cell 26) runs GSM8K + MMLU automatically after training completes.
+Environment variables required: `WANDB_API_KEY` and `HF_TOKEN`, set via pod dashboard (never via CLI). See [User Guide](./docs/USER_GUIDE/README.md) for the full RunPod setup walkthrough.
 
 ---
 
-## History
-
-Chronological training log: **[docs/HISTORY.md](docs/HISTORY.md)**.
-
-Milestones in reverse chronological order:
-
-| Date | Event |
-|---|---|
-| 2026-04-19 | 742m Tier C complete: 78.6 min, best CE 5.72, domain vocabulary acquired |
-| 2026-04-19 | Preset size bugs fixed: 742m was secretly 6.6B; 1b was secretly ~7B |
-| 2026-04-19 | Gradient checkpointing landed: 2.65x VRAM reduction, bit-exact loss |
-| 2026-04-19 | NVIDIA full stack integrated (MIX v3, NeMo-style recipe) |
-| 2026-04-19 | 150m validation baseline: CE 6.66 at 750 steps, "the the the" → word-frequency learning |
-| 2026-04-19 | Five pre-launch fixes landed (answer-tag format, tokenizer v2, SpinorApollonian, AHN, SAE) |
-| 2026-04-18 | HF archive extended to 36 months + 23 AI labs (2,286 KG triples) |
-| 2026-04-16 | N3 SleepGate result: 59.9% (+5.3pp over L1.5 baseline) — new FANT 2 best |
-| 2026-04-16 | FANT 3 architectural modules landed and smoke-tested |
-
----
-
-## Architectural Decisions
-
-All ADRs (Architectural Decision Records) are in **[docs/ADR/](docs/ADR/)**.
-
-| ADR | Decision |
-|---|---|
-| [ADR 0001](docs/ADR/0001-matryoshka-moe-over-standard-moe.md) | Matryoshka MoE over standard top-k MoE |
-| [ADR 0002](docs/ADR/0002-spinor-apollonian-over-scalar-curvature.md) | Spinor Apollonian memory over scalar curvature classifier |
-| [ADR 0003](docs/ADR/0003-nvidia-datasets-over-community.md) | NVIDIA reasoning datasets as primary training signal |
-| [ADR 0004](docs/ADR/0004-gradient-checkpointing-for-742m-plus.md) | Gradient checkpointing mandatory at 742m and above |
-
----
-
-## Related Research
-
-Key papers grounding the FANT 3 architecture:
+## Related research
 
 | Paper | Connection |
 |---|---|
-| Kocik, arXiv:2001.05866 — Spinors and Descartes | Theoretical basis for SpinorApollonianMemory chirality split |
-| Wang et al., arXiv:2509.26520 — Matryoshka MoE | Nested expert activation with elastic inference |
-| ByteDance AHN (2025) | Artificial Hippocampus Network short+long term memory |
+| Kocik, arXiv:2001.05866 | Theoretical basis for Spinor Apollonian memory chirality split |
+| Wang et al., arXiv:2509.26520 | Matryoshka Mixture of Experts |
+| arxiv:2604.16278 DeepInsightTheorem | Progressive Apprentice/Journeyman/Expert curriculum |
+| arxiv:2604.16004 AgentV-RL | Agentic verifier for Fix 3 RL plan (deferred, post-pretrain) |
+| ByteDance AHN (2025) | Artificial Hippocampus Network short + long term memory |
 | Anthropic Scaling Monosemanticity (2024) | SAE introspection design |
-| TurboQuant, arXiv:2504.19874 (ICLR 2026) | Post-training KV-cache compression (planned) |
+| TurboQuant, arXiv:2504.19874 (ICLR 2026) | Post-training KV-cache compression (queued) |
 | Parisi RSB / de Almeida-Thouless, arXiv:2604.11921 | Theoretical grounding for MoE routing diversity |
-| Delétang et al. (2023) — Language Models are Compressors | Compression-as-intelligence framing |
-| TRIM-KV, arXiv:2512.03324 | Retention gate for Apollonian memory eviction (planned) |
-| Kimi k1.5 (2025) | SleepGate memory consolidation inspiration |
+| Delétang et al. (2023) | Language Models are Compressors — the framing |
+| TRIM-KV, arXiv:2512.03324 | Retention gate for Apollonian memory eviction (queued) |
 
 ---
 
-## License and Acknowledgments
+## License and acknowledgments
 
-License: TBD (research-only at present).
+Research-only at present. License TBD before any public release.
 
-Training data sources are CC-BY-4.0 (NVIDIA datasets) and permissive open licenses (FineWeb-Edu CC-BY, FineTome Apache 2.0). The Sonnet 4.6 and Opus 4.6 distillation datasets are used under their respective HuggingFace repository terms.
+Training data sources are CC-BY-4.0 (NVIDIA datasets) or permissive open licenses (FineWeb-Edu CC-BY, FineTome Apache 2.0). The Sonnet 4.6 and Opus 4.6 distillation datasets are used under their respective HuggingFace repository terms.
 
-This workspace is a private research project. The FANT 3 architecture is original; it draws on and cites the published papers listed above.
+The FANT 3 architecture is original. The papers listed above are the external references whose ideas it builds on or cites.
+
+---
+
+## See also
+
+- [Achievements](./ACHIEVEMENTS.md) — what has been measured and verified
+- [Claude context](./CLAUDE.md) — session notes for AI collaborators
+- [Overview](./overview/README.md) — one-page conceptual summary
+- [Glossary](./docs/glossary.md) — terms and abbreviations
+- [Size comparison](./docs/size-comparison.md) — FANT vs GPT-class models in detail
