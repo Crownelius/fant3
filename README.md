@@ -121,6 +121,16 @@ Or open `notebooks/fant3_1b_nvidia_train.ipynb` in Colab with an A100, set `TARG
 - ETF (Equiangular Tight Frame) routing and free compression
 - Progressive curriculum and why it works in 1B–3B
 
+**For the actual equations:** [Mathematical Foundations](./docs/mathematical-foundations.md)
+- Matryoshka MoE parameter-count derivation
+- MoR contractive decay and Banach fixed-point
+- MASA rank-r decomposition (600x attention param reduction derivation)
+- Spinor Apollonian: Cl(1,2) Clifford algebra + Descartes invariant + chirality sign
+- ETF and the Welch bound
+- Echo-state property and Cerebellum
+- Phase-weighted curriculum distribution matrix
+- Compression-as-intelligence (bits-per-byte from cross-entropy)
+
 ### 4. Developer guide
 
 **For contributors:** [Developer Guide](./docs/DEVELOPER_GUIDE/README.md)
@@ -284,3 +294,4 @@ The FANT 3 architecture is original. The papers listed above are the external re
 - [Overview](./overview/README.md) — one-page conceptual summary
 - [Glossary](./docs/glossary.md) — terms and abbreviations
 - [Size comparison](./docs/size-comparison.md) — FANT vs GPT-class models in detail
+- [Mathematical foundations](./docs/mathematical-foundations.md) — equations, proofs, and notation

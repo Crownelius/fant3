@@ -15,7 +15,8 @@ Complete documentation suite for the FANT 3 workspace. Pick a path by role:
 |---|---|
 | [USER_GUIDE](./USER_GUIDE/README.md) | Training recipes, evaluation, RunPod setup, Colab setup |
 | [DEVELOPER_GUIDE](./DEVELOPER_GUIDE/README.md) | Architecture walkthrough, contribution protocol, debugging |
-| [THEORY](./THEORY/README.md) | Mathematical foundations: MoE, MoR, MASA, Spinor Apollonian, ETF, curriculum |
+| [THEORY](./THEORY/README.md) | Theory overview: MoE, MoR, MASA, Spinor Apollonian, ETF, curriculum (plain English) |
+| [mathematical-foundations.md](./mathematical-foundations.md) | Formal derivations: equations, invariants, proof sketches |
 | [article](./article/README.md) | Narrative essays about the research journey |
 | [ADR](./ADR/) | Architectural Decision Records (why specific choices were made) |
 | [architecture](./architecture/) | Component deep-dives |

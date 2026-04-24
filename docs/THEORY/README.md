@@ -1,6 +1,8 @@
 # FANT 3 Theory Guide
 
-The mathematical foundations of each architectural component. Every section maps to a named module in the codebase and cites the external paper it builds on.
+The mathematical foundations of each architectural component in plain English. Every section maps to a named module in the codebase and cites the external paper it builds on.
+
+**For the formal equations, derivations, and proof sketches**, see the rigorous companion: [mathematical-foundations.md](../mathematical-foundations.md).
 
 ## Matryoshka MoE
 
