@@ -45,6 +45,123 @@ The other components (MASA attention, AHN, ETF routing, Cerebellum, progressive 
 
 ---
 
+## How the model works
+
+The full forward pass, for a token at position $t$ with hidden state $x_t^{(\ell)}$ at layer $\ell$, threading every FANT 3 component into a single computation:
+
+**Embedding and position encoding.**
+
+$$
+x_t^{(0)} = E[\text{token}_t] + \mathrm{RoPE}(t)
+$$
+
+Tied embedding $E \in \mathbb{R}^{V \times d}$ shared with the LM head, promoted to fp32 to stabilize the logit pre-tie.
+
+**Per-layer update** (for $\ell = 1, \ldots, L$):
+
+$$
+\tilde{x}_t^{(\ell)} = x_t^{(\ell-1)} + \underbrace{\sum_{h=1}^{H} \sum_{i=1}^{r} c_{\ell,h,i} \cdot \mathrm{Attn}\!\left(A_{\pi(\ell,h,i)},\; \mathrm{LN}(x_t^{(\ell-1)})\right)}_{\text{MASA: rank-}r\text{ reconstruction from shared atom dictionary } \{A_1, \ldots, A_n\}}
+$$
+
+**If layer $\ell$ is an MoE block** (applied via the Mixture-of-Recursions iterated map, $K \sim \text{Uniform}\{1, \ldots, K_{\max}\}$ at training, $K_{\text{infer}}$ at inference):
+
+$$
+y_t^{(k+1)} = (1-\alpha_k)\, y_t^{(k)} + \alpha_k\, f_\theta(y_t^{(k)}), \quad k = 0, \ldots, K-1
+$$
+
+with the shared block
+
+$$
+f_\theta(y) = \mathrm{LN}(y) + \underbrace{\sum_{e \in \mathrm{top}\text{-}k(\mathrm{Router}(y))} g_e \cdot \mathrm{Expert}_e(\mathrm{LN}(y))}_{\text{Matryoshka MoE}}
+$$
+
+and contractive decay $\alpha_k = \alpha_0 \gamma^k$ guaranteeing Banach fixed-point convergence.
+
+**Memory:**
+
+$$
+x_t^{(\ell)} = \tilde{x}_t^{(\ell)} + \mathrm{gate}_{\mathrm{AHN}} \cdot \mathrm{AHN}\!\left(\tilde{x}_t^{(\ell)}\right) + \mathrm{gate}_{\mathrm{mem}} \cdot \mathrm{Memory}\!\left(\chi_t,\; \tilde{x}_t^{(\ell)}\right)
+$$
+
+where the chirality classifier
+
+$$
+\chi_t = \mathrm{sign}\!\left(Q\!\left(P\, \tilde{x}_t^{(\ell)}\right)\right), \qquad Q(v) = \left(\sum_i v_i\right)^2 - 2\sum_i v_i^2
+$$
+
+routes the token to the α-pack (instance memory) when $\chi_t = +1$ or β-pack (schema memory) when $\chi_t = -1$. Both gates are zero-initialized so neither module corrupts the base transformer at step 0.
+
+**Cerebellum** (742m and 1b scales only):
+
+$$
+x_t^{(L)} \mathrel{+}= W_{\mathrm{Purkinje}} \cdot r_t, \qquad r_{t+1} = (1-\lambda) r_t + \lambda \tanh(W_{\mathrm{res}} r_t + W_{\mathrm{in}} x_t^{(L)})
+$$
+
+with $W_{\mathrm{res}}$ fixed (spectral radius 0.95) and only $W_{\mathrm{Purkinje}}$ trained.
+
+**Output logits:**
+
+$$
+\text{logits}_t = W_{\mathrm{LM}} \cdot \mathrm{LN}(x_t^{(L)}), \qquad W_{\mathrm{LM}} = E^\top
+$$
+
+**Training loss:**
+
+$$
+\mathcal{L} = \underbrace{-\sum_t \log p(y_t \mid x_t)}_{\text{cross-entropy}} \; + \; \lambda_z \sum_\ell \bigl(\mathrm{logsumexp}(\text{router-logits}_\ell)\bigr)^2 \; + \; \lambda_{\text{mono}} \sum_{k=1}^{K-1} \max\bigl(0,\; \mathcal{L}_{k+1} - \mathcal{L}_k\bigr)^2
+$$
+
+The three terms: ordinary next-token cross-entropy; router z-loss regularizer (caps logit magnitude to prevent overflow); monotonic-CE penalty enforcing that deeper MoR passes never regress.
+
+Per-component references: [MoE § 1](./docs/mathematical-foundations.md#1-matryoshka-mixture-of-experts), [MoR § 2](./docs/mathematical-foundations.md#2-mixture-of-recursions), [MASA § 3](./docs/mathematical-foundations.md#3-multi-head-attention-with-shared-atoms-masa), [Spinor Apollonian § 4](./docs/mathematical-foundations.md#4-spinor-apollonian-memory), [ETF § 5](./docs/mathematical-foundations.md#5-equiangular-tight-frames-and-router-freezing), [Cerebellum § 6](./docs/mathematical-foundations.md#6-cerebellum-echo-state-reservoir-with-purkinje-readout), [curriculum § 7](./docs/mathematical-foundations.md#7-progressive-curriculum), [compression § 8](./docs/mathematical-foundations.md#8-compression-as-intelligence), [fractal structure § 9](./docs/mathematical-foundations.md#9-the-fractal-thread).
+
+### Data flow
+
+```mermaid
+flowchart TD
+    tok["token ids<br/>(B, T)"] --> emb["Embedding<br/>E in R^{V x d}<br/>+ RoPE(t)"]
+    emb --> dense1["Dense Block 1<br/>MASA attn + FFN<br/>(rank-r shared atoms)"]
+    dense1 --> dense2["Dense Block 2<br/>MASA attn + FFN"]
+    dense2 --> moe1["MoE Block 1<br/>entered by MoR"]
+
+    moe1 --> mor{"Mixture of Recursions<br/>K ~ Uniform 1..K_max (train)<br/>K = inference_k_override (eval)"}
+    mor -->|"x^(k+1) = (1-a_k)x^(k) + a_k f_theta(x^(k))<br/>contractive a_k decay"| mor_loop["K iterations"]
+    mor_loop --> router["Router<br/>ETF-initialized, frozen at step 500"]
+    router --> topk["top-k gating"]
+    topk --> moe["Matryoshka MoE<br/>nested expert megapools<br/>level-ell gives elastic inference"]
+    moe --> moeN["... more MoE Blocks"]
+
+    moeN --> chi{"Chirality classifier<br/>chi = sign(Q(Px))<br/>Descartes invariant"}
+    chi -->|"chi = +1"| alpha_pack["alpha-pack<br/>instance memory<br/>(C_alpha slots, FIFO)"]
+    chi -->|"chi = -1"| beta_pack["beta-pack<br/>schema memory<br/>(C_beta slots, FIFO)"]
+    alpha_pack --> mem_read["Memory read<br/>cross-attn to both packs"]
+    beta_pack --> mem_read
+
+    moeN --> ahn["AHN<br/>short FIFO + compressed<br/>long-term buffer"]
+
+    mem_read --> gate_m["Gate_mem * Memory<br/>(zero-init)"]
+    ahn --> gate_a["Gate_AHN * AHN<br/>(zero-init)"]
+    moeN --> residual["Residual add"]
+    gate_m --> residual
+    gate_a --> residual
+
+    residual --> cere["Cerebellum<br/>(742m+ only)<br/>echo-state reservoir +<br/>trainable Purkinje"]
+    cere --> ln_final["Final LayerNorm"]
+    ln_final --> lm_head["LM Head<br/>W_LM = E^T (tied, fp32)"]
+    lm_head --> logits["logits<br/>(B, T, V)"]
+
+    logits --> ce["Cross-entropy loss"]
+    router --> zloss["Router z-loss<br/>lambda_z * logsumexp^2"]
+    mor --> monoloss["Monotonic CE penalty<br/>lambda_mono * sum max(0, CE_k+1 - CE_k)^2"]
+    ce --> total["Total loss L"]
+    zloss --> total
+    monoloss --> total
+```
+
+The diagram shows one MoE block in full detail; the architecture repeats Block 1 → … → Block N between Dense Block 2 and the memory+AHN stage. Scale presets vary $(L, d, n_{\text{experts}}, d_{\text{moe}})$; see the [scale ladder](#scale-ladder).
+
+---
+
 ## Quick start
 
 ### Prerequisites
