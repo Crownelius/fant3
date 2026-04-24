@@ -37,7 +37,13 @@ sys.path.insert(0, str(_ROOT))
 
 from fant3.config import fant3_1b, fant3_20m, fant3_10m, fant3_15m, fant3_80m, fant3_50m
 from fant3.model.fant3_model import FANT3Model
-from fant3.training import precondition_router_grads_, schedule_multiplier
+from fant3.training import (
+    precondition_router_grads_,
+    schedule_multiplier,
+    build_curriculum,
+    get_active_phase,
+    PRESETS as CURRICULUM_PRESETS,
+)
 from fant2.data.streaming import InterleavedMultiDatasetStream
 
 
@@ -91,6 +97,17 @@ def parse_args():
     p.add_argument("--hf-login", action="store_true",
                    help="Call huggingface_hub.login() with the HF_TOKEN env var. Required for "
                         "gated datasets like nvidia/Nemotron-CC-v2.1.")
+
+    # Data-mix curriculum (arxiv:2604.16278 DeepInsightTheorem)
+    p.add_argument("--curriculum", default="legacy_2phase",
+                   choices=sorted(CURRICULUM_PRESETS.keys()),
+                   help="data-mix curriculum preset. legacy_2phase reproduces "
+                        "the pre-curriculum 2-phase behavior (default, "
+                        "bit-compatible). deepinsight_3phase implements the "
+                        "Apprentice/Journeyman/Expert schedule from "
+                        "arxiv:2604.16278 which showed disproportionate gains "
+                        "at 1B-3B scale. flat_1phase is the no-curriculum "
+                        "control arm for A/B testing.")
     return p.parse_args()
 
 
@@ -112,25 +129,13 @@ def build_cfg(scale="1b", max_seq_len=None):
     return cfg
 
 
-PHASE_A_DATASETS = [
-    'fineweb-edu',
-    'nvidia-openmath-reasoning',
-    'nvidia-opencode-reasoning-2',
-    'nvidia-openmath-2',
-    'opus46-crownelius-3300x',
-    'kimi-k25-distill',
-]
-PHASE_A_WEIGHTS = [0.35, 0.20, 0.10, 0.10, 0.15, 0.10]
-
-PHASE_B_DATASETS = [
-    'nvidia-cascade2-sft-if',
-    'sonnet46-120k',
-    'nvidia-openmath-2',
-    'nvidia-cascade2-sft-science',
-    'nvidia-daring-anteater',
-    'nvidia-cascade2-sft-chat',
-]
-PHASE_B_WEIGHTS = [0.25, 0.30, 0.15, 0.10, 0.10, 0.10]
+# Kept for backward compatibility with existing imports. The source of
+# truth for all curriculum mixes now lives in fant3.training.curriculum;
+# these names simply re-export the legacy_2phase preset's two phases.
+PHASE_A_DATASETS = list(CURRICULUM_PRESETS["legacy_2phase"].phases[0].datasets)
+PHASE_A_WEIGHTS = list(CURRICULUM_PRESETS["legacy_2phase"].phases[0].weights)
+PHASE_B_DATASETS = list(CURRICULUM_PRESETS["legacy_2phase"].phases[1].datasets)
+PHASE_B_WEIGHTS = list(CURRICULUM_PRESETS["legacy_2phase"].phases[1].weights)
 
 
 def make_batch_sampler(stream, tok, batch_size, seq_len, pad_id, eos_id,
@@ -243,6 +248,7 @@ def main():
                         "warmup_steps": args.warmup_steps,
                         "total_steps": args.total_steps,
                         "phase_a_steps": args.phase_a_steps,
+                        "curriculum": args.curriculum,
                         "z_coef": args.z_coef,
                         "grad_clip": args.grad_clip,
                         "max_seq_len": args.max_seq_len,
@@ -310,17 +316,45 @@ def main():
     _cache = build_hash_cache(rebuild=False)
     log(f"decontamination hashes: {sum(len(v) for v in _cache.values())}")
 
-    # Streams + samplers — each rank gets a different seed so they see different
-    # interleaved sequences. InterleavedMultiDatasetStream is a stateless iterator
-    # over HF streaming datasets; there's no cross-rank coordination needed.
-    stream_A = InterleavedMultiDatasetStream(PHASE_A_DATASETS, weights=PHASE_A_WEIGHTS, seed=rank)
-    stream_B = InterleavedMultiDatasetStream(PHASE_B_DATASETS, weights=PHASE_B_WEIGHTS, seed=rank + 1000)
-    sampler_A = make_batch_sampler(stream_A, tok, args.batch_size, args.seq_len_a,
-                                   pad_id, eos_id, pack_mode="per_row",
-                                   max_row_tokens=args.seq_len_a, is_contaminated=is_contaminated)
-    sampler_B = make_batch_sampler(stream_B, tok, args.batch_size, args.seq_len_b,
-                                   pad_id, eos_id, pack_mode="per_row",
-                                   max_row_tokens=args.seq_len_b, is_contaminated=is_contaminated)
+    # Curriculum + per-phase streams/samplers.
+    # Each rank gets a different seed per phase so they see different interleaved
+    # sequences. InterleavedMultiDatasetStream is a stateless iterator over HF
+    # streaming datasets; no cross-rank coordination needed.
+    curriculum = build_curriculum(
+        args.curriculum,
+        phase_a_steps=args.phase_a_steps if args.curriculum == "legacy_2phase" else None,
+        total_steps=args.total_steps,
+    )
+    log(f"curriculum: {curriculum.name} ({len(curriculum.phases)} phases)")
+    for i, phase in enumerate(curriculum.phases):
+        end_step = int(phase.end_frac * args.total_steps)
+        log(f"  phase {i} '{phase.name}': end_frac={phase.end_frac:.3f} "
+            f"(end_step={end_step}) datasets={len(phase.datasets)} "
+            f"seq_len={phase.seq_len}")
+
+    # For legacy_2phase, honour the existing --seq-len-a / --seq-len-b CLI flags.
+    # Other presets use phase.seq_len baked into the curriculum.
+    phase_seq_lens = []
+    for i, phase in enumerate(curriculum.phases):
+        if args.curriculum == "legacy_2phase":
+            phase_seq_lens.append(args.seq_len_a if i == 0 else args.seq_len_b)
+        else:
+            phase_seq_lens.append(phase.seq_len)
+
+    phase_samplers = []
+    for i, phase in enumerate(curriculum.phases):
+        stream = InterleavedMultiDatasetStream(
+            list(phase.datasets),
+            weights=list(phase.weights),
+            seed=rank + 1000 * i,
+        )
+        sampler = make_batch_sampler(
+            stream, tok, args.batch_size, phase_seq_lens[i],
+            pad_id, eos_id, pack_mode="per_row",
+            max_row_tokens=phase_seq_lens[i],
+            is_contaminated=is_contaminated,
+        )
+        phase_samplers.append(sampler)
 
     # Optimiser (bf16 params + 8-bit Adam state) — construct AFTER DDP wrap so
     # it walks model.parameters() correctly.
@@ -352,10 +386,23 @@ def main():
     if device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats()
 
+    # Precompute phase-end step numbers for milestone ckpts (exclusive of total_steps
+    # which has its own _final tag). Guard against end_step == 0 on very short runs.
+    phase_end_steps: dict[int, str] = {}
+    for p in curriculum.phases[:-1]:
+        es = max(1, int(p.end_frac * args.total_steps))
+        # legacy preset historically named the boundary _phaseA (no underscore);
+        # keep that exact suffix so resume commands and existing ops runbooks work.
+        suffix = f"_phase{p.name}" if args.curriculum == "legacy_2phase" else f"_phase_{p.name}"
+        phase_end_steps[es] = suffix
+
     for step in range(start_step + 1, args.total_steps + 1):
         inner.set_global_step(step)
-        sampler = sampler_A if step <= args.phase_a_steps else sampler_B
-        phase_tag = 'A' if step <= args.phase_a_steps else 'B'
+        phase = get_active_phase(step, args.total_steps, curriculum)
+        phase_idx = curriculum.phases.index(phase)
+        sampler = phase_samplers[phase_idx]
+        phase_tag = phase.name
+        cur_seq_len = phase_seq_lens[phase_idx]
         cur_lr = lr_at(step)
         for g in optim.param_groups: g['lr'] = cur_lr
 
@@ -429,7 +476,7 @@ def main():
             vram = torch.cuda.max_memory_allocated() / 1e9 if device.startswith("cuda") else 0.0
             cur_gn = grad_norm_hist[-1] if grad_norm_hist else 0.0
             mstats = inner.memory.get_stats() if hasattr(inner, 'memory') else {}
-            log(f'[{phase_tag} T={args.seq_len_a if phase_tag=="A" else args.seq_len_b}] '
+            log(f'[{phase_tag} T={cur_seq_len}] '
                 f'step={step:5d} lr={cur_lr:.2e} loss={loss_hist[-1]:.4f} z={step_z:.3f} '
                 f'gn={cur_gn:.2f} max|logit|={max_logit:.1f} max|rtr|={max_rtr:.1f} '
                 f'vram={vram:.1f}GB x{world_size} chirality={mstats.get("chirality_balance", 0.0):.3f} '
@@ -457,13 +504,15 @@ def main():
         # Only rank 0 saves. Every rank has identical weights post-step under DDP,
         # so rank-0 state_dict is representative. Use inner.state_dict() (not the
         # DDP wrapper) so resume works under any world_size.
-        is_milestone = (step == args.phase_a_steps or step == args.total_steps)
-        is_rolling   = (step % args.ckpt_every == 0)
+        is_phase_boundary = step in phase_end_steps
+        is_final          = (step == args.total_steps)
+        is_milestone      = is_phase_boundary or is_final
+        is_rolling        = (step % args.ckpt_every == 0)
         if is_main and (is_rolling or is_milestone):
             path = args.ckpt_dir / f'step_{step:05d}.pt'
             if is_milestone:
                 # stash milestones in a named copy so rolling-trim doesn't delete them
-                milestone_suffix = "_phaseA" if step == args.phase_a_steps else "_final"
+                milestone_suffix = "_final" if is_final else phase_end_steps[step]
                 path = args.ckpt_dir / f'step_{step:05d}{milestone_suffix}.pt'
             payload = {'model': inner.state_dict(), 'optim': optim.state_dict(),
                        'step': step, 'cfg': cfg.__dict__,
@@ -473,12 +522,16 @@ def main():
             sz = path.stat().st_size / 1e9
             print(f'  [ckpt] step={step} -> {path}  size={sz:.2f} GB', flush=True)
 
-            # Rolling-keep trim on the non-milestone ckpts only (milestones are named
-            # with _phaseA or _final suffix and are never deleted by this sweep).
+            # Rolling-keep trim on the non-milestone ckpts only. Milestones are
+            # named with either _phase{name}.pt or _final.pt and are never deleted
+            # by this sweep. Regex-free check via basename substring.
             if args.ckpt_keep_last > 0:
                 import glob as _glob
+                def _is_milestone_name(p: str) -> bool:
+                    bn = os.path.basename(p)
+                    return bn.endswith('_final.pt') or '_phase' in bn
                 rolling = [p for p in _glob.glob(str(args.ckpt_dir / 'step_*.pt'))
-                           if not (p.endswith('_phaseA.pt') or p.endswith('_final.pt'))]
+                           if not _is_milestone_name(p)]
                 rolling.sort(key=lambda p: os.path.getmtime(p))
                 for old in rolling[:-args.ckpt_keep_last]:
                     try:
