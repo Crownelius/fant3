@@ -99,3 +99,9 @@ Thumbs.db
 # Claude Code / local scratch
 # ============================================================================
 .claude/
+
+# API key files (added by 2026-05-07 backup audit; never commit)
+.openrouter_runtime_key
+*.runtime_key
+*runtime_key.json
+.env
